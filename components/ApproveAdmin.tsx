@@ -12,7 +12,7 @@ import type { Address, Hex, PublicClient, WalletClient } from 'viem'
 import { supabase, type PredictionRecord } from '@/lib/supabase'
 import { signAdminAction } from '@/lib/adminSign'
 import {
-  createMarketOnChain, acceptFactoryOwnership, getFactoryOwnership,
+  createMarketOnChain, acceptFactoryOwnership, getFactoryOwnership, getMarketAddress,
 } from '@/lib/predictions/settlement'
 import ResolutionPlanBadge from './ResolutionPlanBadge'
 
@@ -53,6 +53,38 @@ async function createSettlementMarket(
   return { ok: true, message: `Approved — settlement pool is live, staking closes ${locks}.` }
 }
 
+/**
+ * Approved predictions that have no settlement pool, so nobody can stake on
+ * them. Module-level because it reads wall-clock time.
+ *
+ * These exist because approving here is not the only way a prediction becomes
+ * approved: the Polymarket mirror writes rows straight to the database as
+ * 'approved', which is the point of an auto-mirror — but it means they never
+ * pass through handleDecide, and the pool is created in handleDecide. So an
+ * imported prediction reaches the feed looking exactly like any other and then
+ * offers no way to back it.
+ *
+ * Creating the pool has to happen from the admin's wallet regardless: the
+ * factory's createMarket is owner-only, and the mirror's wallet isn't the owner
+ * (nor should it be — an unattended job holding market-creation rights is a
+ * much bigger blast radius than one that can only mint Triples).
+ */
+async function findPredictionsMissingPools(
+  publicClient: PublicClient,
+  rows: PredictionRecord[]
+): Promise<PredictionRecord[]> {
+  const nowSeconds = Math.floor(Date.now() / 1000)
+  const missing: PredictionRecord[] = []
+  for (const row of rows) {
+    // No date, or a date already gone: createMarket would revert anyway.
+    if (!row.resolution_date) continue
+    if (Math.floor(Date.parse(`${row.resolution_date}T00:00:00Z`) / 1000) <= nowSeconds) continue
+    const market = await getMarketAddress(publicClient, row.triple_id as Hex)
+    if (!market) missing.push(row)
+  }
+  return missing
+}
+
 export default function ApproveAdmin() {
   const [predictions, setPredictions] = useState<PredictionRecord[]>([])
   const [loading, setLoading] = useState(true)
@@ -63,6 +95,11 @@ export default function ApproveAdmin() {
   // factory's pending owner, show an activate button until accepted.
   const [needsOwnershipAccept, setNeedsOwnershipAccept] = useState(false)
   const [acceptingOwnership, setAcceptingOwnership] = useState(false)
+  // Approved predictions with no staking pool — see findPredictionsMissingPools.
+  const [missingPools, setMissingPools] = useState<PredictionRecord[]>([])
+  const [scanningPools, setScanningPools] = useState(true)
+  const [poolBusyId, setPoolBusyId] = useState<string | null>(null)
+  const [creatingAll, setCreatingAll] = useState(false)
   const { address } = useAccount()
   const publicClient = usePublicClient()
   const { data: walletClient } = useWalletClient()
@@ -102,6 +139,81 @@ export default function ApproveAdmin() {
     check()
     return () => { cancelled = true }
   }, [publicClient, address])
+
+  useEffect(() => {
+    if (!publicClient) return
+    let cancelled = false
+    const scan = async () => {
+      setScanningPools(true)
+      const { data } = await supabase
+        .from('predictions')
+        .select('*')
+        .eq('approval_status', 'approved')
+        .eq('resolution_status', 'unresolved')
+        .order('resolution_date', { ascending: true })
+      if (cancelled) return
+      try {
+        const missing = await findPredictionsMissingPools(publicClient, data ?? [])
+        if (!cancelled) setMissingPools(missing)
+      } catch (err) {
+        console.error('pool scan failed', err)
+      }
+      if (!cancelled) setScanningPools(false)
+    }
+    scan()
+    return () => { cancelled = true }
+  }, [publicClient])
+
+  const handleCreatePool = async (pred: PredictionRecord) => {
+    if (!publicClient || !walletClient) {
+      setError('Connect your admin wallet first — creating a pool is an on-chain transaction.')
+      return
+    }
+    setPoolBusyId(pred.id)
+    setError(null)
+    try {
+      const result = await createSettlementMarket(publicClient, walletClient, pred)
+      setNotice(result.message.replace(/^Approved[—,] /, '').replace(/^Approved/, 'Done'))
+      if (result.ok) setMissingPools(prev => prev.filter(p => p.id !== pred.id))
+    } catch (err) {
+      const message = err instanceof Error ? err.message.split('\n')[0] : 'pool creation failed'
+      setError(`Could not create the pool for "${pred.subject}": ${message}`)
+    } finally {
+      setPoolBusyId(null)
+    }
+  }
+
+  // Sequential on purpose: the factory has no batch entrypoint, so this is one
+  // transaction (and one wallet prompt) per prediction. Stops at the first
+  // failure rather than firing a dozen more prompts at a wallet that just
+  // rejected one.
+  const handleCreateAllPools = async () => {
+    if (!publicClient || !walletClient) {
+      setError('Connect your admin wallet first — creating pools is an on-chain transaction.')
+      return
+    }
+    setCreatingAll(true)
+    setError(null)
+    let created = 0
+    try {
+      for (const pred of [...missingPools]) {
+        setPoolBusyId(pred.id)
+        const result = await createSettlementMarket(publicClient, walletClient, pred)
+        if (result.ok) {
+          created++
+          setMissingPools(prev => prev.filter(p => p.id !== pred.id))
+        }
+        setNotice(`created ${created} staking pool${created === 1 ? '' : 's'}…`)
+      }
+      setNotice(`Done — ${created} staking pool${created === 1 ? '' : 's'} created. People can back these now.`)
+    } catch (err) {
+      const message = err instanceof Error ? err.message.split('\n')[0] : 'pool creation failed'
+      setError(`Stopped after ${created} pool${created === 1 ? '' : 's'}: ${message}`)
+    } finally {
+      setPoolBusyId(null)
+      setCreatingAll(false)
+    }
+  }
 
   const handleAcceptOwnership = async () => {
     if (!publicClient || !walletClient) return
@@ -216,6 +328,69 @@ export default function ApproveAdmin() {
           borderRadius: 8, border: '1px solid #ff444433',
         }}>
           {error}
+        </div>
+      )}
+
+      {/* Approved but unstakeable. Imported predictions land in the feed already
+          approved, so they never got a pool — without this they look live and
+          then offer no way to back them. */}
+      {!scanningPools && missingPools.length > 0 && (
+        <div style={{
+          marginBottom: 24, padding: 18, background: '#1a150a',
+          borderRadius: 12, border: '1px solid #3d2f1a',
+        }}>
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            flexWrap: 'wrap', gap: 12, marginBottom: 4,
+          }}>
+            <div style={{ fontSize: 15, fontWeight: 800, color: 'var(--amber)' }}>
+              {missingPools.length} approved prediction{missingPools.length === 1 ? '' : 's'} with no staking pool
+            </div>
+            <button
+              onClick={handleCreateAllPools}
+              disabled={creatingAll || poolBusyId !== null}
+              className="btn btn-yes"
+              style={{ padding: '8px 18px', fontSize: 13, borderRadius: 10, opacity: creatingAll ? 0.5 : 1 }}
+            >
+              {creatingAll ? 'creating…' : `create all ${missingPools.length}`}
+            </button>
+          </div>
+          <div style={{
+            fontSize: 12, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', marginBottom: 14,
+          }}>
+            {'// these are live in the feed but nobody can back them — one transaction each'}
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {missingPools.map(pred => (
+              <div key={pred.id} style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                gap: 12, flexWrap: 'wrap', padding: '10px 14px',
+                background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10,
+              }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 600 }}>
+                    {pred.subject} <span style={{ color: 'var(--text-dim)' }}>{pred.claim}</span>
+                  </div>
+                  <div style={{ fontSize: 11.5, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                    resolves {pred.resolution_date}
+                    {pred.resolution_plan?.external?.provider === 'polymarket' && ' · imported'}
+                  </div>
+                </div>
+                <button
+                  onClick={() => handleCreatePool(pred)}
+                  disabled={poolBusyId !== null || creatingAll}
+                  className="btn btn-yes"
+                  style={{
+                    padding: '7px 16px', fontSize: 12.5, borderRadius: 9,
+                    opacity: poolBusyId === pred.id ? 0.5 : 1, whiteSpace: 'nowrap',
+                  }}
+                >
+                  {poolBusyId === pred.id ? 'creating…' : 'create pool'}
+                </button>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
