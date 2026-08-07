@@ -51,6 +51,9 @@ export default function Home() {
   ]
   // Hide admin links from non-admins (the pages guard themselves too).
   const navItems = allNavItems.filter(item => !item.adminOnly || showAdmin)
+  // Phone menu. Collapsed by default so the feed owns the screen.
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  const currentNavItem = navItems.find(item => item.id === activePage)
 
   // The positions rail is for pages where "what am I holding?" is the natural
   // second question. It would only duplicate the page on My predictions, and
@@ -81,15 +84,40 @@ export default function Home() {
         </div>
       </nav>
 
+      {/* Phone only: the menu collapses into this one bar, directly under the
+          header rather than beside the logo. Closed, it costs a single row and
+          says where you are; open, it lists every page at full width — the old
+          sideways-scrolling pill strip left Approve, Resolve and Docs stranded
+          off the right edge where nobody would find them. */}
+      <button
+        type="button"
+        className="nav-toggle"
+        onClick={() => setMobileNavOpen(open => !open)}
+        aria-expanded={mobileNavOpen}
+        aria-controls="app-sidebar"
+      >
+        <span className="nav-toggle-current">
+          <span style={{ fontSize: 15 }}>{currentNavItem?.icon ?? '▤'}</span>
+          {currentNavItem?.label ?? 'Menu'}
+        </span>
+        <span className={`nav-toggle-caret${mobileNavOpen ? ' open' : ''}`}>▾</span>
+      </button>
+
       {/* Body */}
       <div className="app-shell">
         {/* Sidebar */}
-        <aside className="app-sidebar">
+        <aside id="app-sidebar" className={`app-sidebar${mobileNavOpen ? ' open' : ''}`}>
           {navItems.map(item => (
             <div key={item.id}>
               {item.section && <div className="nav-section">{item.section}</div>}
               <div
-                onClick={() => { setActivePage(item.id as Page); setDetailId(null) }}
+                onClick={() => {
+                  setActivePage(item.id as Page)
+                  setDetailId(null)
+                  // Picking a destination is the end of navigating — leaving it
+                  // open would cover the page you just asked for.
+                  setMobileNavOpen(false)
+                }}
                 className={`nav-item${activePage === item.id ? ' active' : ''}`}
               >
                 <span style={{ fontSize: 16 }}>{item.icon}</span>

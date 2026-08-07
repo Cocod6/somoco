@@ -623,48 +623,91 @@ body > * {
   }
 }
 
-/* Phone: nav rail becomes a scrolling row of pills under the top bar. */
+/* The collapsed phone menu. Hidden on desktop, where the sidebar is always
+   visible and a toggle would be pure obstruction. */
+.nav-toggle { display: none; }
+
+/* Phone: the nav collapses into one bar under the header.
+   It used to be a sideways-scrolling row of pills, which had two problems —
+   it permanently spent a band of vertical space on the smallest screens, and
+   anything past the fourth item (Approve, Resolve, Docs) sat off the right
+   edge with no visible cue that it existed. A toggle costs one row closed and
+   shows every destination open. */
 @media (max-width: 860px) {
   .app-shell {
     flex-direction: column;
     align-items: stretch;    /* same reason as above — column ⇒ this is width */
   }
-  .app-sidebar {
-    width: 100%;
-    min-width: 0;
-    height: auto;
-    top: var(--nav-h);
-    z-index: 90;
+
+  .nav-toggle {
     display: flex;
-    gap: 6px;
-    overflow-x: auto;
-    overflow-y: hidden;
-    padding: 8px 12px;
-    border-right: none;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    width: 100%;
+    padding: 12px 16px;
+    /* Sits directly beneath the header and stays there while the feed scrolls,
+       so getting elsewhere never requires scrolling back to the top. */
+    position: sticky;
+    top: var(--nav-h);
+    z-index: 95;
+    border: none;
     border-bottom: 1px solid var(--border);
     background: rgba(10, 10, 10, 0.9);
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
-    scrollbar-width: none;
+    color: var(--text);
+    font-size: 14px;
+    font-weight: 600;
+    text-align: left;
+    cursor: pointer;
   }
-  .app-sidebar::-webkit-scrollbar { display: none; }
-  /* Section captions ("discover", "create", "admin") are a vertical-list idea —
-     meaningless in a row, and they'd eat the scroll width. */
-  .nav-section { display: none; }
-  .nav-item {
-    padding: 9px 14px;
-    border-left: none;
-    border-radius: 999px;
-    border: 1px solid #222;
-    background: #141414;
+  .nav-toggle-current {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
+    color: var(--accent);
+  }
+  .nav-toggle-caret {
     flex-shrink: 0;
+    color: var(--text-dim);
+    font-size: 13px;
+    transition: transform 0.18s ease;
   }
-  .nav-item.active {
-    border-left: none;
-    border-color: var(--accent-border);
-    background: var(--accent-dark);
+  .nav-toggle-caret.open { transform: rotate(180deg); }
+
+  .app-sidebar {
+    display: none;           /* closed by default — the feed owns the screen */
+    width: 100%;
+    min-width: 0;
+    height: auto;
+    /* Static, not sticky: the open menu pushes the page down like a normal
+       dropdown. Sticky here would need the toggle's exact height hardcoded as
+       an offset, and that number breaks the moment the font or padding moves. */
+    position: static;
+    z-index: 94;
+    padding: 8px 0 12px;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    background: rgba(10, 10, 10, 0.97);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
   }
+  .app-sidebar.open {
+    display: block;
+  }
+  /* Vertical list again, so the section captions mean something — they were
+     hidden while this was a row. */
+  .nav-section { padding: 12px 20px 4px; }
+  .nav-item {
+    padding: 12px 20px;      /* a comfortable thumb target, not a 10px row */
+    font-size: 15px;
+  }
+
   .app-content {
     padding: 16px;
     gap: 16px;
