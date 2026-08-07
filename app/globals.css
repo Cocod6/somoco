@@ -1,0 +1,687 @@
+:root {
+  /* Helvetica Neue Bold is the UI face. It ships with macOS and iOS (and is
+     installed on Coco's machine), so where it exists it costs nothing and
+     renders instantly. Everyone else — most of Windows and Android — gets
+     Inter, downloaded via next/font: a neo-grotesque drawn for screens, far
+     closer to Helvetica than the Arial they'd otherwise fall to. Arial and
+     Liberation Sans stay at the end as the no-JS/no-download floor.
+     --font-inter is declared by next/font on <html>; see app/layout.tsx. */
+  --font-sans: 'Helvetica Neue', 'HelveticaNeue', var(--font-inter), Helvetica,
+    Arial, 'Liberation Sans', sans-serif;
+  --font-mono: 'IBM Plex Mono', monospace;
+  --bg: #0a0a0a;
+  --bg-card: #111111;
+  --bg-input: #111111;
+  --border: #1e1e1e;
+  --border-hover: #333333;
+  --text: #f0ede6;
+  --text-muted: #888888;
+  --text-dim: #555555;
+  --accent: #c8f135;
+  --accent-hover: #d4ff3a;
+  --accent-dark: #1a2a0a;
+  --accent-border: #2a3d1a;
+  --accent-text: #7ab832;
+  --blue: #7ecfff;
+  --blue-bg: #0a1a2a;
+  --blue-border: #1a3a4a;
+  --purple: #c8a0ff;
+  --purple-bg: #1a1a2e;
+  --purple-border: #2a1a4a;
+  --amber: #ffd07e;
+  --amber-bg: #1a150a;
+  --amber-border: #4a3a1a;
+  /* Height of the sticky top bar. Everything else that sticks (the nav rail,
+     the positions rail) offsets from this, so the bar's height is set in one
+     place and can never drift out of sync with them. */
+  --nav-h: 64px;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+/* Form controls don't inherit type from the page by default — without this the
+   inputs would still be rendering in the browser's own UI font. */
+input, textarea, select, button {
+  font-family: inherit;
+  font-weight: inherit;
+}
+
+html, body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  /* Bold by default — the whole interface is set in the bold cut, and the
+     heavier weights below (700/800 on headings) still read as a step up. */
+  font-weight: 700;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Ambient depth — a faint accent-lit glow bleeding from the top of the page,
+   plus a whisper of grain, so the near-black background reads as lit rather
+   than flat. Fixed + non-interactive so it never affects layout. */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(900px 500px at 78% -8%, rgba(200, 241, 53, 0.09), transparent 60%),
+    radial-gradient(800px 500px at 12% -12%, rgba(126, 207, 255, 0.05), transparent 55%),
+    radial-gradient(circle at 1px 1px, rgba(240, 237, 230, 0.035) 1px, transparent 1.6px);
+  background-size: auto, auto, 26px 26px;
+}
+/* Keep real content above the ambient layer. */
+body > * {
+  position: relative;
+  z-index: 1;
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg);
+}
+::-webkit-scrollbar-thumb {
+  background: #2a2a2a;
+  border-radius: 3px;
+  transition: background 0.2s;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--accent-text);
+}
+
+/* Accessible focus ring in the brand accent. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* --- Motion + reusable spice helpers --- */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes glowPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(200, 241, 53, 0.0); }
+  50%      { box-shadow: 0 0 22px 0 rgba(200, 241, 53, 0.18); }
+}
+
+.fade-up {
+  animation: fadeUp 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Interactive card: gradient surface, soft shadow, and a lift + accent-lit
+   border on hover. Attach to any clickable panel. */
+.spice-card {
+  background: linear-gradient(180deg, #141414 0%, #101010 100%);
+  border: 1px solid var(--border);
+  transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+}
+.spice-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--accent-border);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(200, 241, 53, 0.08);
+}
+
+/* Accent number/text glow. */
+.glow-accent {
+  color: var(--accent);
+  text-shadow: 0 0 18px rgba(200, 241, 53, 0.35);
+}
+
+/* --- Buttons --- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 12px;
+  font-weight: 700;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: transform 0.16s ease, box-shadow 0.16s ease, background 0.16s ease,
+    border-color 0.16s ease, color 0.16s ease;
+}
+.btn:active { transform: translateY(1px); }
+
+.btn-accent {
+  background: linear-gradient(180deg, #d6ff4f 0%, var(--accent) 100%);
+  color: #0a0a0a;
+  box-shadow: 0 2px 14px rgba(200, 241, 53, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+}
+.btn-accent:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 26px rgba(200, 241, 53, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+}
+.btn-accent:disabled {
+  background: #222;
+  color: #555;
+  box-shadow: none;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.btn-ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-muted);
+}
+.btn-ghost:hover:not(:disabled) { border-color: var(--border-hover); color: var(--text); }
+.btn-ghost:disabled { opacity: 0.35; cursor: not-allowed; }
+
+.btn-yes {
+  background: var(--accent-dark);
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+.btn-yes:hover {
+  background: #22350d;
+  border-color: #3d5a1f;
+  box-shadow: 0 0 18px rgba(200, 241, 53, 0.18);
+}
+.btn-no {
+  background: #1a0a0a;
+  border-color: #3d1a1a;
+  color: #ff6b6b;
+}
+.btn-no:hover {
+  background: #2a0f0f;
+  border-color: #5a2626;
+  box-shadow: 0 0 18px rgba(255, 107, 107, 0.15);
+}
+
+/* --- Sidebar navigation --- */
+.nav-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 24px;
+  font-size: 14px;
+  cursor: pointer;
+  color: var(--text-muted);
+  text-decoration: none;
+  border-left: 2px solid transparent;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+}
+.nav-item:hover { color: var(--text); background: rgba(255, 255, 255, 0.02); }
+.nav-item.active {
+  color: var(--accent);
+  background: linear-gradient(90deg, rgba(200, 241, 53, 0.08), transparent 70%);
+  border-left-color: var(--accent);
+  text-shadow: 0 0 16px rgba(200, 241, 53, 0.35);
+}
+
+/* --- Category chips / filter pills --- */
+.chip {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  background: #141414;
+  color: var(--text-muted);
+  border: 1px solid #222;
+  transition: transform 0.15s ease, border-color 0.15s ease, color 0.15s ease,
+    background 0.15s ease, box-shadow 0.15s ease;
+}
+.chip:hover { border-color: var(--border-hover); color: var(--text); transform: translateY(-1px); }
+.chip.active {
+  background: linear-gradient(180deg, #d6ff4f, var(--accent));
+  color: var(--bg);
+  border-color: var(--accent);
+  box-shadow: 0 0 18px rgba(200, 241, 53, 0.35);
+}
+
+/* Tiny informational chip (category tag on a card) — not interactive. */
+.chip-mini {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  background: #161616;
+  border: 1px solid #262626;
+  color: var(--text-muted);
+}
+
+/* --- List rows (trending, leaderboard) --- */
+.row-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+}
+.row-card:hover {
+  transform: translateX(3px);
+  border-color: var(--accent-border);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(200, 241, 53, 0.06);
+}
+
+/* --- Stat tiles --- */
+.stat-tile {
+  background: linear-gradient(180deg, #151515 0%, #101010 100%);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 16px;
+  box-shadow: inset 0 1px 0 rgba(200, 241, 53, 0.06);
+  transition: border-color 0.2s;
+}
+.stat-tile:hover { border-color: #2a2a2a; }
+.num { font-variant-numeric: tabular-nums; }
+
+/* --- Conviction / odds bars --- */
+.bar-track { background: #1e1e1e; border-radius: 999px; overflow: hidden; }
+.bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent-text), var(--accent));
+  box-shadow: 0 0 10px rgba(200, 241, 53, 0.5);
+  transition: width 0.6s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* --- Loading skeletons --- */
+@keyframes shimmer {
+  from { background-position: -400px 0; }
+  to   { background-position: 400px 0; }
+}
+.skeleton {
+  border-radius: 14px;
+  background: linear-gradient(90deg, #111 25%, #1a1a1a 50%, #111 75%);
+  background-size: 800px 100%;
+  animation: shimmer 1.4s linear infinite;
+}
+
+/* --- Dashed call-to-action (feed footer) --- */
+.cta-dashed {
+  background: transparent;
+  border: 1px dashed #2a2a2a;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+.cta-dashed:hover { border-color: var(--accent-border); color: var(--accent-text); }
+
+/* --- App layout ---
+   Three columns on a wide screen: the nav rail, the feed, and the user's own
+   positions. The two breakpoints below drop them one at a time — the positions
+   rail tucks under the feed first (it's supporting information), and only on a
+   genuinely small screen does the nav rail become a scrolling row of pills.
+   Collapsing both at once would waste the whole tablet range. */
+.app-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: var(--nav-h);
+  padding: 0 24px;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: rgba(10, 10, 10, 0.72);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+/* Network pill — informative, not essential; first thing to go on a phone. */
+.app-nav-chain {
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 20px;
+  padding: 6px 14px;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+.app-shell {
+  display: flex;
+  flex: 1;
+  align-items: flex-start;
+}
+
+.app-sidebar {
+  width: 220px;
+  min-width: 220px;
+  border-right: 1px solid var(--border);
+  padding: 24px 0;
+  position: sticky;
+  top: var(--nav-h);
+  height: calc(100vh - var(--nav-h));
+  overflow-y: auto;
+}
+
+.nav-section {
+  font-size: 10px;
+  color: #444;
+  padding: 16px 24px 6px;
+  font-family: var(--font-mono);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.app-content {
+  flex: 1;
+  min-width: 0;              /* lets the grid inside actually shrink */
+  display: flex;
+  align-items: flex-start;
+  gap: 24px;
+  padding: 24px;
+  max-width: 1600px;
+}
+
+.app-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.app-rail {
+  width: 300px;
+  min-width: 300px;
+  position: sticky;
+  top: calc(var(--nav-h) + 24px);
+  max-height: calc(100vh - var(--nav-h) - 40px);
+  overflow-y: auto;
+}
+
+/* --- Card grid (feed) ---
+   auto-fill rather than a fixed column count: the same rule gives three cards
+   across beside the rail on a laptop, more on a wide monitor, and one on a
+   phone — without any of the breakpoints knowing about cards.
+   216px is deliberate: on a ~1300px window the feed column is ~700px wide, and
+   3 x 216 + gaps = 672 — so three columns fit and six markets are on screen.
+   At 228 it came to 708 and fell back to two columns by five pixels. */
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(216px, 1fr));
+  gap: 12px;
+}
+
+/* --- Feed chrome ---
+   Everything stacked above the grid. It lives here rather than in inline styles
+   so the height tiers at the bottom of this file can tighten it: on a short
+   screen these four blocks are the difference between seeing six cards and
+   seeing four. */
+.feed-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.feed-search {
+  position: relative;
+  margin-bottom: 12px;
+}
+.feed-search input {
+  width: 100%;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 11px 38px 11px 34px;
+  font-size: 13px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+.feed-search input:focus { border-color: var(--accent-border); }
+
+.feed-chips {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 6px;
+  margin-bottom: 20px;
+  scrollbar-width: none;
+}
+.feed-chips::-webkit-scrollbar { display: none; }
+
+.feed-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+/* Every feed card is exactly this tall, whatever it contains — a long
+   prediction, a short one, a picture or none. Uniform height is the whole
+   point: ragged cards make a grid look broken, and a fixed height is what lets
+   two rows of three fit on one screen. Content that would overflow is clamped
+   (title) or moved to the detail view rather than being allowed to stretch. */
+.feed-card {
+  height: 320px;
+  padding: 14px;
+  border-radius: 14px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.feed-card-media {
+  height: 84px;
+  flex-shrink: 0;
+  margin-bottom: 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: linear-gradient(135deg, #181818, #0f0f0f);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.feed-card-media img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* The prediction itself — the one thing a reader is actually here for, so it
+   gets the space. Four lines at 14px holds ~100 characters, which covers the
+   long end of what the parser produces ("President Bola Tinubu says the word
+   'fufu' during October 1st speech on October 1st, 2026?" is 90), so in
+   practice nothing gets cut. The clamp stays as a backstop against a freak
+   200-character prediction rather than as the normal case. */
+.feed-card-title {
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1.35;
+  letter-spacing: -0.1px;
+  display: -webkit-box;
+  -webkit-line-clamp: 5;
+  line-clamp: 5;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  min-height: 76px;          /* four lines reserved, so short titles don't shift the row */
+}
+
+/* --- Positions rail --- */
+.rail-panels {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.rail-row {
+  background: #131313;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+}
+.rail-row:hover {
+  background: #171717;
+  border-color: var(--border-hover);
+  transform: translateX(2px);
+}
+.rail-row-title {
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;     /* three lines holds a full-length prediction */
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* --- Fitting six cards on one screen ---
+   Three ACROSS is a width problem and the grid already solves it. Two ROWS is a
+   height problem, and viewport height varies far more than width: a 1080p
+   monitor leaves ~940px of usable page, a scaled laptop ~730. These tiers spend
+   picture height, then the picture itself, to keep the second row on screen.
+   All of them are gated on min-width:861px — below that the layout is a single
+   column you're meant to scroll, so shrinking the pictures there would cost the
+   feed its best feature for nothing. */
+@media (min-width: 861px) and (max-height: 1000px) {
+  .feed-card { height: 292px; }
+  .feed-card-media { height: 68px; }
+  .feed-stats { margin-bottom: 16px; }
+}
+
+@media (min-width: 861px) and (max-height: 880px) {
+  /* The picture is the single biggest block of vertical space; past this point
+     six-on-screen is worth more than a 46px letterbox sliver of it.
+     206px is not arbitrary: it's exactly what a FOUR-line title needs (76px)
+     plus the header, meta line and buttons. Clamping to three lines saved 19px
+     and immediately started cutting real predictions off — measured, not
+     guessed — and truncation is the one thing this layout must not do. */
+  .feed-card { height: 206px; }
+  .feed-card-media { display: none; }
+  .feed-card-title {
+    min-height: 57px;
+    -webkit-line-clamp: 4;
+    line-clamp: 4;
+  }
+  .stat-tile { padding: 11px; }
+  .feed-stats { margin-bottom: 12px; }
+  .feed-search input { padding-top: 9px; padding-bottom: 9px; }
+  .feed-chips { margin-bottom: 10px; }
+  .feed-heading { margin-bottom: 10px; }
+}
+
+/* Very short screens (a 1366x768 laptop leaves ~640px of page). The only things
+   left to cut are the three stat tiles and the predictions themselves — so the
+   stat tiles go. They're a summary of the markets; the markets are the point.
+   Shrinking the cards any further would put the "…" back in the text, which is
+   the one thing this layout is not allowed to do. */
+@media (min-width: 861px) and (max-height: 700px) {
+  .feed-stats { display: none; }
+}
+
+/* Tablet / small laptop: positions move below the feed and lie side by side. */
+@media (max-width: 1180px) {
+  .app-content {
+    flex-direction: column;
+    /* Once this is a column, align-items controls WIDTH, and flex-start would
+       size the feed and the rail to their content instead of the screen —
+       which overflows the viewport horizontally. Stretch is what makes a
+       stacked column actually fit. */
+    align-items: stretch;
+  }
+  .app-rail {
+    width: 100%;
+    min-width: 0;
+    position: static;
+    max-height: none;
+    overflow: visible;
+  }
+  .rail-panels {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    align-items: start;
+  }
+}
+
+/* Phone: nav rail becomes a scrolling row of pills under the top bar. */
+@media (max-width: 860px) {
+  .app-shell {
+    flex-direction: column;
+    align-items: stretch;    /* same reason as above — column ⇒ this is width */
+  }
+  .app-sidebar {
+    width: 100%;
+    min-width: 0;
+    height: auto;
+    top: var(--nav-h);
+    z-index: 90;
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 8px 12px;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    background: rgba(10, 10, 10, 0.9);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    scrollbar-width: none;
+  }
+  .app-sidebar::-webkit-scrollbar { display: none; }
+  /* Section captions ("discover", "create", "admin") are a vertical-list idea —
+     meaningless in a row, and they'd eat the scroll width. */
+  .nav-section { display: none; }
+  .nav-item {
+    padding: 9px 14px;
+    border-left: none;
+    border-radius: 999px;
+    border: 1px solid #222;
+    background: #141414;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .nav-item.active {
+    border-left: none;
+    border-color: var(--accent-border);
+    background: var(--accent-dark);
+  }
+  .app-content {
+    padding: 16px;
+    gap: 16px;
+  }
+}
+
+/* Narrow phone: the network pill goes, the wallet button stays. */
+@media (max-width: 560px) {
+  .app-nav { padding: 0 14px; }
+  .app-nav-chain { display: none; }
+  .card-grid { grid-template-columns: 1fr; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fade-up { animation: none; }
+  .skeleton { animation: none; }
+  .spice-card, .btn, .chip, .row-card, .bar-fill, .rail-row { transition: none; }
+  .spice-card:hover, .btn-accent:hover:not(:disabled), .chip:hover, .row-card:hover,
+  .rail-row:hover { transform: none; }
+}
