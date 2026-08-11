@@ -407,6 +407,123 @@ body > * {
   overflow-y: auto;
 }
 
+/* --- Site footer ---
+   Sits outside .app-shell, so it spans the full width under both rails rather
+   than being trapped in the feed column. The shell above it is flex:1, which
+   means on a short page the footer is pushed to the bottom of the viewport
+   instead of floating halfway up. */
+.site-footer {
+  border-top: 1px solid var(--border);
+  /* A touch darker than the page so the eye reads it as the end of the
+     document, not another card. */
+  background: rgba(0, 0, 0, 0.35);
+  margin-top: 40px;
+}
+
+.footer-inner {
+  max-width: 1600px;
+  margin: 0 auto;
+  padding: 40px 24px 28px;
+  display: grid;
+  /* The brand block gets roughly twice a link column; auto-fit lets the link
+     columns wrap under it on the way down to a phone without a breakpoint. */
+  grid-template-columns: minmax(240px, 2fr) repeat(auto-fit, minmax(150px, 1fr));
+  gap: 32px;
+}
+
+.footer-brand { max-width: 380px; }
+
+.footer-wordmark {
+  font-size: 17px;
+  font-weight: 800;
+  letter-spacing: -0.5px;
+  background: linear-gradient(90deg, #f0ede6 30%, var(--accent));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.footer-tagline {
+  margin-top: 12px;
+  font-size: 13px;
+  line-height: 1.6;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+.footer-chain {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.footer-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 8px rgba(200, 241, 53, 0.6);
+}
+
+.footer-col {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.footer-head {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: #444;
+  margin-bottom: 2px;
+}
+
+/* One rule for both the <button> in-app links and the <a> external ones, so a
+   reset button can't show up looking like a control. */
+.footer-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: none;
+  background: none;
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  color: var(--text-muted);
+  text-decoration: none;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+.footer-link:hover { color: var(--accent); }
+.footer-ext { font-size: 10px; color: var(--text-dim); }
+.footer-link:hover .footer-ext { color: var(--accent-text); }
+
+.footer-bottom {
+  max-width: 1600px;
+  margin: 0 auto;
+  padding: 16px 24px 32px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 20px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.footer-risk {
+  max-width: 620px;
+  line-height: 1.6;
+  text-align: right;
+}
+
 /* --- Card grid (feed) ---
    auto-fill rather than a fixed column count: the same rule gives three cards
    across beside the rail on a laptop, more on a wide monitor, and one on a
@@ -712,6 +829,24 @@ body > * {
     padding: 16px;
     gap: 16px;
   }
+
+  /* Phone: the brand block stops being a column of its own and the link
+     columns sit two-up, which keeps the whole footer to about one screen. */
+  .footer-inner {
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    padding: 32px 16px 24px;
+    gap: 28px 20px;
+  }
+  .footer-brand { grid-column: 1 / -1; max-width: none; }
+
+  /* The two halves of the bottom bar stack; right-aligning the risk line once
+     it's full width would leave a ragged left edge against the copyright. */
+  .footer-bottom {
+    flex-direction: column;
+    align-items: flex-start;
+    padding: 16px 16px 28px;
+  }
+  .footer-risk { text-align: left; max-width: none; }
 }
 
 /* Narrow phone: the network pill goes, the wallet button stays. */

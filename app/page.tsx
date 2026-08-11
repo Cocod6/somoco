@@ -15,6 +15,7 @@ import PredictionDetail from '../components/PredictionDetail'
 import AdminGate from '../components/AdminGate'
 import SomocoLogo from '../components/SomocoLogo'
 import YourRail from '../components/YourRail'
+import SiteFooter from '../components/SiteFooter'
 import { useIsAdmin } from '../lib/admin'
 
 type Page = 'feed' | 'trending' | 'explore' | 'submit' | 'my' | 'resolve' | 'approve' | 'leaderboard'
@@ -59,6 +60,17 @@ export default function Home() {
   // second question. It would only duplicate the page on My predictions, and
   // it's noise while submitting or moderating.
   const showRail = ['feed', 'trending', 'leaderboard', 'explore'].includes(activePage) || detailId !== null
+
+  // Used by the footer. Same state change as a sidebar click, plus a jump to
+  // the top: a footer link is clicked from the very bottom of the page, so
+  // without this the new page renders off-screen above you and the click looks
+  // like it did nothing.
+  const goTo = (page: string) => {
+    setActivePage(page as Page)
+    setDetailId(null)
+    setMobileNavOpen(false)
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
 
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
@@ -125,14 +137,6 @@ export default function Home() {
               </div>
             </div>
           ))}
-
-          <div className="nav-section">protocol</div>
-          <a href="https://portal.intuition.systems" target="_blank" rel="noopener noreferrer" className="nav-item">
-            <span>↗</span> Intuition portal
-          </a>
-          <a href="https://intuition.box/docs" target="_blank" rel="noopener noreferrer" className="nav-item">
-            <span>↗</span> Docs
-          </a>
         </aside>
 
         {/* Main content + the user's own positions */}
@@ -173,6 +177,8 @@ export default function Home() {
           )}
         </div>
       </div>
+
+      <SiteFooter onNavigate={goTo} />
     </div>
   )
 }
