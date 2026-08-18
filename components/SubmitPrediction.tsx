@@ -101,19 +101,27 @@ function toDbRow(
  * can submit itself pre-approved. The missing-optional-column retry that used
  * to live here moved into that route alongside the insert.
  */
-async function insertPredictionRows(rows: ReturnType<typeof toDbRow>[]): Promise<string | null> {
+async function insertPredictionRows(
+  rows: ReturnType<typeof toDbRow>[]
+): Promise<{ error: string | null; approved: boolean[] }> {
   try {
     const res = await fetch('/api/predictions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ rows }),
     })
-    if (res.ok) return null
+    if (res.ok) {
+      const { approved } = (await res.json().catch(() => ({}))) as { approved?: boolean[] }
+      return { error: null, approved: approved ?? [] }
+    }
 
     const { error } = await res.json().catch(() => ({ error: res.statusText }))
-    return error ?? 'Could not save prediction.'
+    return { error: error ?? 'Could not save prediction.', approved: [] }
   } catch (err) {
-    return err instanceof Error ? err.message : 'Could not reach the server to save prediction.'
+    return {
+      error: err instanceof Error ? err.message : 'Could not reach the server to save prediction.',
+      approved: [],
+    }
   }
 }
 
@@ -145,6 +153,10 @@ export default function SubmitPrediction({
   const [error, setError] = useState<string | null>(null)
   const [txHash, setTxHash] = useState<string | null>(null)
   const [submittedCount, setSubmittedCount] = useState(0)
+  // How many of them cleared the automatic checks and are already on the feed.
+  // The rest are in the review queue, and the success screen must not tell
+  // someone their prediction is "live" when it is waiting for a person.
+  const [wentLive, setWentLive] = useState(0)
   // bytes32 Triple ids created this submission — used for the portal links
   const [tripleIds, setTripleIds] = useState<string[]>([])
 
@@ -322,13 +334,14 @@ export default function SubmitPrediction({
       setTxHash(onChain.txHash)
       setTripleIds([onChain.tripleId])
 
-      const dbError = await insertPredictionRows([
+      const saved = await insertPredictionRows([
         toDbRow(result, onChain.tripleId, address ?? '', image?.url ?? null, friendConfig()),
       ])
-      if (dbError) {
+      if (saved.error) {
         // The Triple is already real on-chain; this only affects the approval queue.
-        console.error('Could not save prediction record:', dbError)
+        console.error('Could not save prediction record:', saved.error)
       }
+      setWentLive(saved.approved.filter(Boolean).length)
 
       setSubmittedCount(1)
       // Clear WITHOUT deleting — the file is referenced by the row we just saved.
@@ -363,10 +376,11 @@ export default function SubmitPrediction({
       const rows = cart.map((item, i) =>
         toDbRow(item.result, batch.triples[i].tripleId, address ?? '', item.image?.url ?? null),
       )
-      const dbError = await insertPredictionRows(rows)
-      if (dbError) {
-        console.error('Could not save batch prediction records:', dbError)
+      const saved = await insertPredictionRows(rows)
+      if (saved.error) {
+        console.error('Could not save batch prediction records:', saved.error)
       }
+      setWentLive(saved.approved.filter(Boolean).length)
 
       setSubmittedCount(cart.length)
       setCart([])
@@ -997,8 +1011,27 @@ export default function SubmitPrediction({
           <div style={{ fontSize: 20, fontWeight: 800, marginBottom: 8 }}>
             {submittedCount > 1 ? `${submittedCount} predictions submitted` : 'prediction submitted'}
           </div>
-          <div style={{ fontSize: 13, color: 'var(--accent-text)', fontFamily: 'var(--font-mono)', marginBottom: 20 }}>
+          <div style={{ fontSize: 13, color: 'var(--accent-text)', fontFamily: 'var(--font-mono)', marginBottom: 14 }}>
             {`// atoms + triple${submittedCount > 1 ? 's' : ''} created on intuition protocol`}
+          </div>
+
+          {/* What happens next, honestly. A prediction that cleared the
+              automatic checks is already on the feed; one that didn't is
+              waiting for a person, and saying "live" either way would be the
+              easiest lie in the app to tell. */}
+          <div style={{
+            fontSize: 12.5, lineHeight: 1.7, marginBottom: 20,
+            color: wentLive > 0 ? 'var(--accent)' : 'var(--amber)',
+          }}>
+            {wentLive === submittedCount && wentLive > 0
+              ? submittedCount > 1
+                ? '🟢 all live on the feed now'
+                : '🟢 live on the feed now — staking opens once its pool is created'
+              : wentLive > 0
+                ? `🟢 ${wentLive} live now · 👁 ${submittedCount - wentLive} held for review`
+                : submittedCount > 1
+                  ? '👁 held for review — a human checks these before they go public'
+                  : '👁 held for review — someone checks it before it goes public'}
           </div>
           {/* View the actual prediction Triple(s) on the Intuition portal */}
           {tripleIds.length > 0 && (

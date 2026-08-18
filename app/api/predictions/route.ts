@@ -10,9 +10,32 @@
 // ignores anything the client sends for those columns. That's what makes the
 // Approve queue a real gate: a forged request can create a *pending* row, which
 // is what submitting does anyway, but it can never self-approve.
+//
+// AUTO-APPROVAL (2026-08-18). Waiting for Coco to click approve meant a
+// prediction could sit invisible for hours, which is a bad first experience for
+// someone who just wrote one. A row is now published immediately when it clears
+// BOTH gates:
+//
+//   1. autoApprove.ts — the structural checks (named authority, UTC deadline,
+//      void clause, >= 7 days out, not a duplicate, no image, real category)
+//   2. aiScreen.ts    — the harm/coherence screen, which is the part no rule
+//      could express: a market on a named person's death passes every
+//      structural check ever written
+//
+// Both must pass. Either one failing, or being unable to run, leaves the row
+// `pending` exactly as before — the queue is still there, it just gets the hard
+// cases instead of everything. Set AUTO_APPROVE=false to switch it off entirely.
+//
+// What this does NOT do is create the on-chain staking pool: createMarket is
+// onlyOwner on MarketFactory and is signed in Coco's browser. So an
+// auto-approved prediction is visible and real, and becomes stakeable when the
+// pools are created from the Approve page.
 
 import { NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabaseAdmin'
+import { assessAutoApproval, claimKeyFor, type AssessableRow } from '@/lib/predictions/autoApprove'
+import { screenForAutoApproval } from '@/lib/predictions/aiScreen'
+import type { ResolutionPlan } from '@/lib/predictions/types'
 
 /**
  * Columns added after the live DB was first created. Any of them may be absent
@@ -24,6 +47,9 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin'
 const OPTIONAL_COLUMNS = [
   'category', 'resolution_plan', 'image_url',
   'is_private', 'invited_wallets', 'judge_wallet', 'vote_window_seconds',
+  // The approval receipt — who let this through and why. Same treatment as the
+  // rest: if the migration hasn't run, the prediction is still saved.
+  'approved_by', 'approval_note',
 ] as const
 
 /** Only these columns may be set by a submitter. Everything else is server-owned. */
@@ -53,6 +79,86 @@ function sanitize(row: Record<string, unknown>): Record<string, unknown> {
     if (col in row) clean[col] = row[col]
   }
   return clean
+}
+
+/** Off switch. Auto-approval is ON unless explicitly disabled. */
+const autoApproveEnabled = () => process.env.AUTO_APPROVE !== 'false'
+
+/**
+ * Claims already live and unresolved, so a second identical market can't be
+ * published automatically. Same shape the mirror uses. Best-effort: if this
+ * read fails we skip the duplicate check rather than refuse every submission.
+ */
+async function loadOpenClaimKeys(db: ReturnType<typeof supabaseAdmin>): Promise<Set<string> | undefined> {
+  const { data, error } = await db
+    .from('predictions')
+    .select('subject, claim')
+    .in('approval_status', ['approved', 'pending'])
+    .eq('resolution_status', 'unresolved')
+  if (error || !data) return undefined
+  return new Set(data.map(r => claimKeyFor(String(r.subject ?? ''), String(r.claim ?? ''))))
+}
+
+/** What the server decided about one submitted row. */
+interface ApprovalDecision {
+  approval_status: 'approved' | 'pending'
+  approved_by: string | null
+  approval_note: string | null
+}
+
+const HELD = (note: string): ApprovalDecision => ({
+  approval_status: 'pending',
+  approved_by: null,
+  approval_note: note,
+})
+
+/**
+ * Decides whether a submitted prediction may go live without a human.
+ *
+ * Order matters: the free structural checks run first and most rejections stop
+ * there, so the paid AI call only happens for predictions that are otherwise
+ * ready. Everything here fails towards `pending` — the queue is the safe state.
+ */
+async function decideApproval(
+  row: Record<string, unknown>,
+  openClaimKeys: Set<string> | undefined
+): Promise<ApprovalDecision> {
+  if (!autoApproveEnabled()) return HELD('Auto-approval is switched off (AUTO_APPROVE=false).')
+
+  // A friend market's jury has to be registered on-chain by the admin at
+  // approval time, so publishing one automatically would produce exactly the
+  // silent, juryless market the PvP date bug already caused once.
+  if (row.is_private === true) return HELD('Friend market — the jury is registered by hand at approval.')
+
+  const assessable: AssessableRow = {
+    subject: String(row.subject ?? ''),
+    claim: String(row.claim ?? ''),
+    condition: (row.condition as string | null) ?? null,
+    category: (row.category as string | null) ?? null,
+    resolution_date: (row.resolution_date as string | null) ?? null,
+    resolution_plan: (row.resolution_plan as ResolutionPlan | null) ?? null,
+    image_url: (row.image_url as string | null) ?? null,
+    creator_address: String(row.creator_address ?? ''),
+  }
+
+  const assessment = assessAutoApproval(assessable, openClaimKeys)
+  if (!assessment.eligible) return HELD(assessment.blockers.join(' '))
+
+  const screen = await screenForAutoApproval({
+    subject: assessable.subject,
+    claim: assessable.claim,
+    condition: assessable.condition,
+    category: assessable.category,
+    resolutionDate: assessable.resolution_date,
+    resolutionPlan: assessable.resolution_plan,
+  })
+  if (!screen.clear) return HELD(screen.reason)
+
+  return {
+    approval_status: 'approved',
+    approved_by: 'auto',
+    approval_note: `Auto-approved: ${assessment.passed.join('; ')}.`,
+  }
 }
 
 export async function POST(request: Request) {
@@ -88,13 +194,26 @@ export async function POST(request: Request) {
     )
   }
 
-  let payload = rows.map(sanitize)
+  // Decide publication per row BEFORE the insert, so an approved prediction is
+  // live the moment it is saved rather than a write behind a write.
+  const openClaimKeys = autoApproveEnabled() ? await loadOpenClaimKeys(db) : undefined
+  const decisions = await Promise.all(rows.map(row => decideApproval(row, openClaimKeys)))
+
+  let payload: Record<string, unknown>[] = rows.map((row, i) => ({ ...sanitize(row), ...decisions[i] }))
 
   // One retry per optional column at most — each attempt drops the column the
   // error named, so this terminates.
   for (let attempt = 0; attempt <= OPTIONAL_COLUMNS.length; attempt++) {
     const { error } = await db.from('predictions').insert(payload)
-    if (!error) return NextResponse.json({ ok: true })
+    if (!error) {
+      return NextResponse.json({
+        ok: true,
+        // The submit UI uses this to say "live now" instead of "waiting for
+        // review" — telling someone their prediction is in a queue it never
+        // entered is a worse lie than saying nothing.
+        approved: decisions.map(d => d.approval_status === 'approved'),
+      })
+    }
 
     const missing = OPTIONAL_COLUMNS.filter(
       col => col in (payload[0] ?? {}) && error.message.includes(col)

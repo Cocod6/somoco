@@ -14,6 +14,8 @@
 import { NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabaseAdmin'
 import { verifyAdmin, type AdminAuth } from '@/lib/adminAuth'
+import { writeResolutionSentence } from '@/lib/predictions/resolutionSentence'
+import type { ResolutionPlan } from '@/lib/predictions/types'
 
 const OUTCOMES = ['resolved_true', 'resolved_false', 'voided'] as const
 type Outcome = (typeof OUTCOMES)[number]
@@ -105,6 +107,35 @@ export async function POST(request: Request) {
     )
   }
 
+  // If the resolver didn't type an explanation, have the AI write one from the
+  // claim, the outcome and the named source. It is told nothing about what
+  // happened in the world and is forbidden from adding facts, so the worst case
+  // is a plain restatement — never invented evidence. Failure returns null and
+  // the note simply stays empty; a resolution already written to the chain must
+  // never fail because a sentence couldn't be drafted.
+  let note = cleanNote(body.note)
+  const sourceUrl = cleanUrl(body.sourceUrl)
+
+  if (!note) {
+    const { data: row } = await db
+      .from('predictions')
+      .select('subject, claim, condition, resolution_plan')
+      .eq('id', id)
+      .maybeSingle()
+
+    if (row) {
+      const plan = row.resolution_plan as ResolutionPlan | null
+      note = await writeResolutionSentence({
+        subject: String(row.subject ?? ''),
+        claim: String(row.claim ?? ''),
+        condition: (row.condition as string | null) ?? null,
+        outcome: outcome as 'resolved_true' | 'resolved_false' | 'voided',
+        sourceUrl,
+        sourceName: plan?.sources?.[0] ?? null,
+      })
+    }
+  }
+
   // The two halves of the receipt that the client does NOT get to state:
   // WHO resolved it is the address the signature was recovered from (verifyAdmin
   // has just proven it), and WHEN is the server's own clock. A browser can
@@ -113,8 +144,8 @@ export async function POST(request: Request) {
   const update: Record<string, unknown> = {
     resolution_status: outcome,
     resolution_tx_hash: txHash ?? null,
-    resolution_source_url: cleanUrl(body.sourceUrl),
-    resolution_note: cleanNote(body.note),
+    resolution_source_url: sourceUrl,
+    resolution_note: note,
     resolved_at: new Date().toISOString(),
     resolved_by: auth!.address!.toLowerCase(),
   }

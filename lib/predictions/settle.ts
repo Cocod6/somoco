@@ -30,6 +30,7 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin'
 import { readPolymarketOutcome } from '@/lib/predictions/polymarket'
 import { resolvePredictionOnChain } from '@/lib/predictions/resolveOnchain'
 import { getMarketAddress, readMarketInfo } from '@/lib/predictions/settlement'
+import { writeResolutionSentence } from '@/lib/predictions/resolutionSentence'
 import type { ExternalResolutionRef } from '@/lib/predictions/types'
 
 export interface SettleOptions {
@@ -272,7 +273,20 @@ export async function runSettlement(options: SettleOptions = {}): Promise<Settle
         // justification and 'polymarket-settler' names the mechanism rather
         // than a person — nobody exercised discretion here.
         resolution_source_url: external.url ?? null,
-        resolution_note: 'Settled automatically from the source market’s published outcome.',
+        // Same sentence writer the admin path uses, so a mechanically settled
+        // market reads like every other one. It cannot invent evidence (it is
+        // never told what happened), and if it is unavailable the fixed
+        // sentence below stands in — this job runs unattended and must not
+        // depend on a second service being up.
+        resolution_note:
+          (await writeResolutionSentence({
+            subject: row.subject,
+            claim: row.claim,
+            condition: row.condition,
+            outcome,
+            sourceUrl: external.url,
+            sourceName: 'the source market',
+          })) ?? 'Settled automatically from the source market’s published outcome.',
         resolved_at: new Date().toISOString(),
         resolved_by: 'polymarket-settler',
       }

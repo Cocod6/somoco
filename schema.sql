@@ -78,6 +78,22 @@ alter table predictions add column if not exists resolved_by text;
 comment on column predictions.resolution_status is
   'unresolved | resolved_true | resolved_false | voided';
 
+-- ---------------------------------------------------------------------------
+-- Approval receipt (2026-08-18)
+--
+-- Predictions can now be published without a human clicking approve, when they
+-- pass BOTH the structural checks in lib/predictions/autoApprove.ts AND the
+-- harm/coherence screen in lib/predictions/aiScreen.ts. These two columns say
+-- which route a prediction took and why, so an automatic decision can be
+-- audited (and argued with) after the fact instead of being invisible.
+--
+-- `approved_by` is 'auto' for the automatic path, or the admin's address when
+-- a person clicked. `approval_note` holds the passed checks, or the reason it
+-- was held for review.
+-- ---------------------------------------------------------------------------
+alter table predictions add column if not exists approved_by text;
+alter table predictions add column if not exists approval_note text;
+
 -- Feed/leaderboard queries hit these constantly.
 create index if not exists predictions_approval_idx on predictions (approval_status);
 create index if not exists predictions_creator_idx on predictions (lower(creator_address));

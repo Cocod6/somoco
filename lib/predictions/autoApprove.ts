@@ -95,10 +95,30 @@ function namesKnownAuthority(row: AssessableRow, plan: ResolutionPlan): boolean 
   // the authorities Somoco knows for this prediction. Substring matching in
   // both directions, because the AI writes "official information from UEFA
   // (uefa.com)" where the registry says "official information from UEFA".
-  return plan.sources.some(source => {
-    const s = source.toLowerCase()
-    return known.some(k => s.includes(k) || k.includes(s) || sharesKeyword(s, k))
-  })
+  if (
+    plan.sources.some(source => {
+      const s = source.toLowerCase()
+      return known.some(k => s.includes(k) || k.includes(s) || sharesKeyword(s, k))
+    })
+  ) {
+    return true
+  }
+
+  // THE SUBJECT IS ITS OWN AUTHORITY. The 800-market study behind
+  // resolutionRules.ts found the authority is nearly always the party itself —
+  // the league publishing its own result, the company announcing its own
+  // earnings — with news as fallback, never primary. The AUTHORITIES registry
+  // can only ever hold a hand-written list, so without this branch
+  // "Apple releases a foldable iPhone" was rejected as an invented source for
+  // naming Apple, which is exactly the right authority.
+  //
+  // The trade-off, stated plainly: this also accepts a source that merely
+  // echoes the subject's name ("Bitcoin data") without being an institution
+  // that announces anything. That is caught downstream — the criteria-length
+  // check, and the harm screen's ambiguity rule, both still apply — and the
+  // cost of being wrong here is a market that needed a human glance, not a
+  // market that pays the wrong person.
+  return plan.sources.some(source => sharesKeyword(source.toLowerCase(), row.subject.toLowerCase()))
 }
 
 /** Distinctive-word overlap, ignoring the boilerplate every source string has. */

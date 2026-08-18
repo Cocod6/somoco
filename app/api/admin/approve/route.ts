@@ -47,10 +47,24 @@ export async function POST(request: Request) {
     )
   }
 
-  const { error } = await db
-    .from('predictions')
-    .update({ approval_status: decision })
-    .eq('id', id)
+  // Record who decided, the same way the automatic path records 'auto'. Without
+  // this the two routes are indistinguishable afterwards, and "did a person
+  // actually look at this?" becomes unanswerable.
+  const update: Record<string, unknown> = {
+    approval_status: decision,
+    approved_by: auth!.address!.toLowerCase(),
+    approval_note: `Reviewed by hand and ${decision}.`,
+  }
+
+  let { error } = await db.from('predictions').update(update).eq('id', id)
+
+  // The approval-receipt columns are newer than this route. A missing migration
+  // must never stop an approval from going through.
+  if (error && (error.message.includes('approved_by') || error.message.includes('approval_note'))) {
+    delete update.approved_by
+    delete update.approval_note
+    ;({ error } = await db.from('predictions').update(update).eq('id', id))
+  }
 
   if (error) {
     console.error('approve update failed:', error.message)
