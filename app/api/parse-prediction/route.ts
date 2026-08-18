@@ -19,8 +19,15 @@ export async function POST(request: Request) {
     const text: string = (body?.text ?? '').trim()
     // Optional user guidance on HOW the prediction should resolve.
     const userResolutionNote: string = String(body?.userResolutionNote ?? '').trim().slice(0, 500)
+    // PVP markets are settled by their own voters, so the parser must not judge
+    // them against public sources or flag them unresolvable. Safe to take from
+    // the client: the worst it can do is skip the source registry on a market
+    // that is going to be reviewed by an admin before it can go anywhere.
+    const pvp = body?.pvp === true
 
-    const { parsed, resolutionPlan } = await parsePredictionText(text, userResolutionNote)
+    const { parsed, resolutionPlan } = await parsePredictionText(
+      text, userResolutionNote, undefined, pvp
+    )
 
     // Check Intuition for existing Atoms matching each part — reuse instead of duplicate
     const [subjectMatches, predicateMatches, objectMatches] = await Promise.all([

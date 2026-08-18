@@ -16,6 +16,7 @@ import { resolvePredictionOnChain } from '@/lib/predictions/resolveOnchain'
 import { getMarketAddress, readMarketInfo, resolveMarket } from '@/lib/predictions/settlement'
 import { signAdminAction } from '@/lib/adminSign'
 import { supabase, type PredictionRecord } from '@/lib/supabase'
+import type { ExternalResolutionRef } from '@/lib/predictions/types'
 
 interface DisplayPrediction {
   id: string
@@ -28,7 +29,22 @@ interface DisplayPrediction {
   tripleId: Hex | null // null = fake test entry, real bytes32 = real prediction
   creatorAddress: string | null
   supabaseId: string | null // needed to update the database record on resolve
+  /**
+   * Pointer to the market this was mirrored from, when there is one. Its
+   * presence is what turns this screen from "decide the outcome" into "confirm
+   * the outcome someone already published" — see sourceOutcomes below.
+   */
+  external: ExternalResolutionRef | null
 }
+
+/**
+ * What the source market says, per prediction id.
+ *   'loading'        — still being read
+ *   'resolved_true'  — the source settled YES
+ *   'resolved_false' — the source settled NO
+ *   null             — the source has NOT settled yet, or could not be read
+ */
+type SourceOutcome = 'loading' | 'resolved_true' | 'resolved_false' | null
 
 function daysUntil(resolutionDate: string): number {
   // Parse "YYYY-MM-DD" as LOCAL midnight — new Date(string) would read it as
@@ -60,6 +76,7 @@ function fromRecord(r: PredictionRecord): DisplayPrediction {
     tripleId: r.triple_id as Hex,
     creatorAddress: r.creator_address,
     supabaseId: r.id,
+    external: r.resolution_plan?.external ?? null,
   }
 }
 
@@ -75,6 +92,7 @@ function fromMock(m: typeof mockPredictions[number]): DisplayPrediction {
     tripleId: null,
     creatorAddress: null,
     supabaseId: null,
+    external: null,
   }
 }
 
@@ -90,6 +108,11 @@ export default function ResolveAdmin({ isConnected }: { isConnected: boolean }) 
   // writes it, but the type has to allow the absence.
   const [resolutionLinks, setResolutionLinks] = useState<Record<string, { resolution: string; reputation: string | null }>>({})
   const [loadingReal, setLoadingReal] = useState(true)
+  // What the SOURCE market says, keyed by prediction id. Read once after the
+  // predictions load. This is the whole point of the screen now: for a mirrored
+  // prediction the outcome is already published, so the admin confirms it
+  // rather than deciding it.
+  const [sourceOutcomes, setSourceOutcomes] = useState<Record<string, SourceOutcome>>({})
 
   const { data: walletClient } = useWalletClient()
   const { address } = useAccount()
@@ -112,8 +135,38 @@ export default function ResolveAdmin({ isConnected }: { isConnected: boolean }) 
           const fakeOnly = prev.filter(p => p.tripleId === null)
           return [...realOnes, ...fakeOnly]
         })
+        void loadSourceOutcomes(realOnes)
       }
       setLoadingReal(false)
+    }
+
+    // Reads what each source market already published. Best-effort by design:
+    // if this fails entirely the screen simply looks the way it always did, and
+    // the admin can still resolve manually. It must never block resolution.
+    const loadSourceOutcomes = async (rows: DisplayPrediction[]) => {
+      const mirrored = rows.filter(p => p.external && p.status === 'pending')
+      if (mirrored.length === 0) return
+
+      setSourceOutcomes(Object.fromEntries(mirrored.map(p => [p.id, 'loading' as SourceOutcome])))
+      try {
+        const res = await fetch('/api/polymarket/outcome', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ refs: mirrored.map(p => p.external) }),
+        })
+        if (!res.ok) throw new Error(res.statusText)
+        const { outcomes } = (await res.json()) as {
+          outcomes: Record<string, 'resolved_true' | 'resolved_false' | null>
+        }
+        setSourceOutcomes(
+          Object.fromEntries(
+            mirrored.map(p => [p.id, outcomes[p.external!.marketId] ?? null] as const)
+          )
+        )
+      } catch (err) {
+        console.error('could not read source outcomes', err)
+        setSourceOutcomes(Object.fromEntries(mirrored.map(p => [p.id, null as SourceOutcome])))
+      }
     }
 
     loadApproved()
@@ -132,6 +185,24 @@ export default function ResolveAdmin({ isConnected }: { isConnected: boolean }) 
     if (!isConnected || !walletClient || !publicClient) {
       alert('Connect your wallet first to resolve a real prediction.')
       return
+    }
+
+    // Contradiction guard. If the source market already published an outcome
+    // and the admin is about to record the OPPOSITE, stop and make them say so
+    // out loud. Nothing here blocks it — there are real cases where the source
+    // is wrong or resolves a subtly different question — but overriding a
+    // published result should never be a thing that happens by mis-click, least
+    // of all on a market holding other people's money.
+    const published = pred.external ? sourceOutcomes[pred.id] : undefined
+    if (published && published !== 'loading' && published !== outcome) {
+      const sourceSays = published === 'resolved_true' ? 'YES' : 'NO'
+      const youSay = outcome === 'resolved_true' ? 'YES' : 'NO'
+      const confirmed = window.confirm(
+        `Polymarket settled this ${sourceSays}. You are about to resolve it ${youSay}.\n\n` +
+          `This overrides a published outcome that anyone can check, on a market that may hold other people's stakes.\n\n` +
+          `Continue only if you are certain the source is wrong or is answering a different question.`
+      )
+      if (!confirmed) return
     }
 
     setResolvingId(pred.id)
@@ -316,6 +387,7 @@ export default function ResolveAdmin({ isConnected }: { isConnected: boolean }) 
             onResolve={handleResolve}
             isResolving={resolvingId === pred.id}
             portalLinks={resolutionLinks[pred.id]}
+            sourceOutcome={pred.external ? sourceOutcomes[pred.id] ?? 'loading' : undefined}
           />
         ))}
       </div>
@@ -328,11 +400,14 @@ function PredictionCard({
   onResolve,
   isResolving,
   portalLinks,
+  sourceOutcome,
 }: {
   prediction: DisplayPrediction
   onResolve: (pred: DisplayPrediction, outcome: 'resolved_true' | 'resolved_false') => void
   isResolving: boolean
   portalLinks?: { resolution: string; reputation: string | null }
+  /** undefined = not a mirrored prediction, so there is nothing to confirm. */
+  sourceOutcome?: SourceOutcome
 }) {
   const status = statusLabel(prediction.resolutionDate)
   const isResolved = prediction.status !== 'pending'
@@ -389,23 +464,40 @@ function PredictionCard({
         </a>
       )}
 
+      {/* What the source market already published. Shown ABOVE the buttons on
+          purpose: the admin should read the answer before reaching for a
+          verdict, not after. */}
+      {!isResolved && sourceOutcome !== undefined && (
+        <SourceOutcomeBanner outcome={sourceOutcome} url={prediction.external?.url} />
+      )}
+
       {!isResolved ? (
         <div style={{ display: 'flex', gap: 10 }}>
           <button
             onClick={() => onResolve(prediction, 'resolved_true')}
             disabled={isResolving}
             className="btn btn-yes"
-            style={{ flex: 1, padding: '10px 0', fontSize: 13, borderRadius: 10, opacity: isResolving ? 0.5 : 1 }}
+            style={{
+              flex: 1, padding: '10px 0', fontSize: 13, borderRadius: 10,
+              opacity: isResolving ? 0.5 : dimUnless(sourceOutcome, 'resolved_true'),
+            }}
           >
-            {isResolving ? '⟳ resolving...' : '✓ mark true'}
+            {isResolving
+              ? '⟳ resolving...'
+              : sourceOutcome === 'resolved_true'
+                ? '✓ confirm TRUE'
+                : '✓ mark true'}
           </button>
           <button
             onClick={() => onResolve(prediction, 'resolved_false')}
             disabled={isResolving}
             className="btn btn-no"
-            style={{ flex: 1, padding: '10px 0', fontSize: 13, borderRadius: 10, opacity: isResolving ? 0.5 : 1 }}
+            style={{
+              flex: 1, padding: '10px 0', fontSize: 13, borderRadius: 10,
+              opacity: isResolving ? 0.5 : dimUnless(sourceOutcome, 'resolved_false'),
+            }}
           >
-            ✗ mark false
+            {sourceOutcome === 'resolved_false' ? '✗ confirm FALSE' : '✗ mark false'}
           </button>
         </div>
       ) : (
@@ -464,6 +556,81 @@ function PredictionCard({
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+/**
+ * Fades the button that CONTRADICTS a published outcome, so the confirming
+ * action is the one that reads as the default. Deliberately a fade and not a
+ * disable — overriding the source has to stay possible, just never accidental.
+ */
+function dimUnless(outcome: SourceOutcome | undefined, side: 'resolved_true' | 'resolved_false'): number {
+  if (outcome === 'resolved_true' || outcome === 'resolved_false') return outcome === side ? 1 : 0.4
+  return 1
+}
+
+/**
+ * The bridge, made visible. Somoco imported this prediction from a market that
+ * settles its own outcomes, so resolving it is not a judgement call — it is
+ * recording what was already decided somewhere public and checkable.
+ */
+function SourceOutcomeBanner({ outcome, url }: { outcome: SourceOutcome; url?: string }) {
+  const base: React.CSSProperties = {
+    borderRadius: 10, padding: '10px 14px', marginBottom: 12,
+    fontFamily: 'var(--font-mono)', fontSize: 12, lineHeight: 1.6,
+  }
+
+  if (outcome === 'loading') {
+    return (
+      <div style={{ ...base, background: '#0a0a0a', border: '1px solid var(--border)', color: 'var(--text-dim)' }}>
+        reading the source market...
+      </div>
+    )
+  }
+
+  // Mirrored, but the source hasn't settled. Resolving now means the admin is
+  // making the call personally — which is exactly what they should be told.
+  if (outcome === null) {
+    return (
+      <div style={{ ...base, background: '#1a1405', border: '1px solid #4a3a0a', color: 'var(--amber)' }}>
+        <strong>the source has not settled this yet.</strong>
+        <div style={{ color: 'var(--text-muted)', marginTop: 4 }}>
+          resolving now is your own judgement, not a confirmation.{' '}
+          {url && (
+            <a href={url} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--amber)', textDecoration: 'underline' }}>
+              check the source ↗
+            </a>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  const yes = outcome === 'resolved_true'
+  return (
+    <div
+      style={{
+        ...base,
+        background: yes ? 'var(--accent-dark)' : '#1a0a0a',
+        border: `1px solid ${yes ? 'var(--accent-border)' : '#3d1a1a'}`,
+        color: yes ? 'var(--accent)' : '#ff6b6b',
+      }}
+    >
+      <strong>🔗 polymarket settled this {yes ? 'TRUE' : 'FALSE'}</strong>
+      <div style={{ color: 'var(--text-muted)', marginTop: 4 }}>
+        you are confirming a published outcome, not deciding one.{' '}
+        {url && (
+          <a
+            href={url}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: yes ? 'var(--accent)' : '#ff6b6b', textDecoration: 'underline' }}
+          >
+            verify at the source ↗
+          </a>
+        )}
+      </div>
     </div>
   )
 }
