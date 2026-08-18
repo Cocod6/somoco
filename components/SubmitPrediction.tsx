@@ -11,8 +11,9 @@
 
 import { useRef, useState } from 'react'
 import { useWalletClient, usePublicClient, useChainId } from 'wagmi'
-import type { Hex } from 'viem'
+import { isAddress, type Hex } from 'viem'
 import type { ParseResponse } from '@/lib/predictions/types'
+import { VOTE_WINDOW_PRESETS, MAX_VOTERS } from '@/lib/predictions/friendJury'
 import { submitPredictionOnChain } from '@/lib/predictions/onchain'
 import { submitBatchOnChain, type BatchPredictionItem } from '@/lib/predictions/batchOnchain'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
@@ -51,8 +52,26 @@ function toBatchItem(r: ParseResponse): BatchPredictionItem {
   }
 }
 
+/**
+ * A friend-market request: keep this prediction out of the public feed and let
+ * the named wallets settle it themselves. Null for an ordinary prediction.
+ * Only ever a request — the binding jury is registered on-chain by the admin
+ * when the prediction is approved (see components/ApproveAdmin.tsx).
+ */
+export interface FriendConfig {
+  invited: string[]
+  judge: string
+  voteWindowSeconds: number
+}
+
 /** Build the Somoco DB row from a parsed prediction + its on-chain Triple id. */
-function toDbRow(r: ParseResponse, tripleId: string, address: string, imageUrl: string | null) {
+function toDbRow(
+  r: ParseResponse,
+  tripleId: string,
+  address: string,
+  imageUrl: string | null,
+  friends: FriendConfig | null = null
+) {
   return {
     triple_id: tripleId,
     creator_address: address,
@@ -66,6 +85,10 @@ function toDbRow(r: ParseResponse, tripleId: string, address: string, imageUrl: 
     // Approve queue. Never auto-approve.
     resolution_plan: r.resolutionPlan ?? null,
     image_url: imageUrl,
+    is_private: friends !== null,
+    invited_wallets: friends?.invited ?? null,
+    judge_wallet: friends?.judge ?? null,
+    vote_window_seconds: friends?.voteWindowSeconds ?? null,
   }
 }
 
@@ -94,12 +117,30 @@ async function insertPredictionRows(rows: ReturnType<typeof toDbRow>[]): Promise
   }
 }
 
-export default function SubmitPrediction({ isConnected, address }: { isConnected: boolean; address?: string }) {
+/**
+ * The submit form, in one of two modes.
+ *
+ * `pvpMode` is the PVP markets page: a friend market is the whole point there,
+ * so the friend fields are always open rather than hidden behind an optional
+ * disclosure, and the cart is gone (a private prediction is submitted alone).
+ * Everything else — parsing, atom dedup, the on-chain write — is identical,
+ * which is why this is a mode rather than a second copy of the form.
+ */
+export default function SubmitPrediction({
+  isConnected, address, pvpMode = false,
+}: { isConnected: boolean; address?: string; pvpMode?: boolean }) {
   const [step, setStep] = useState<Step>('input')
   const [text, setText] = useState('')
   // Optional user guidance on HOW the prediction should resolve
   const [resolutionNote, setResolutionNote] = useState('')
   const [showNote, setShowNote] = useState(false)
+  // Friend market (PvP): private, and settled by the invited wallets.
+  // On the PVP page this is always on and there is nothing to toggle.
+  const [privateToggle, setPrivateToggle] = useState(false)
+  const isPrivate = pvpMode || privateToggle
+  const [invitesText, setInvitesText] = useState('')
+  const [judgeText, setJudgeText] = useState('')
+  const [voteWindow, setVoteWindow] = useState(VOTE_WINDOW_PRESETS[1].seconds)
   const [result, setResult] = useState<ParseResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [txHash, setTxHash] = useState<string | null>(null)
@@ -154,7 +195,7 @@ export default function SubmitPrediction({ isConnected, address }: { isConnected
       const res = await fetch('/api/parse-prediction', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, userResolutionNote: resolutionNote.trim() }),
+        body: JSON.stringify({ text, userResolutionNote: resolutionNote.trim(), pvp: isPrivate }),
       })
       const data = await res.json()
 
@@ -205,6 +246,37 @@ export default function SubmitPrediction({ isConnected, address }: { isConnected
     setImageError(null)
   }
 
+  // --- Friend market helpers -------------------------------------------
+  // Addresses are accepted one per line, or comma/space separated — people
+  // paste them out of a group chat in every possible shape.
+  const invited = invitesText
+    .split(/[\s,]+/)
+    .map(a => a.trim().toLowerCase())
+    .filter(a => a.length > 0)
+  const uniqueInvited = invited.filter((a, i) => invited.indexOf(a) === i)
+  const judge = judgeText.trim().toLowerCase()
+
+  const friendError = (): string | null => {
+    if (!isPrivate) return null
+    const bad = uniqueInvited.find(a => !isAddress(a))
+    if (bad) return `"${bad}" is not a wallet address.`
+    if (uniqueInvited.length < 2) return 'Invite at least 2 friends — they are the ones who vote.'
+    if (uniqueInvited.length > MAX_VOTERS) return `At most ${MAX_VOTERS} friends can be invited.`
+    if (!judge) return 'Name a judge — someone to decide if you all disagree.'
+    if (!isAddress(judge)) return `"${judgeText.trim()}" is not a wallet address.`
+    if (uniqueInvited.includes(judge)) return 'The judge cannot also be one of the voters.'
+    if (address && judge === address.toLowerCase() && uniqueInvited.includes(address.toLowerCase())) {
+      return 'You cannot judge a market you are betting in.'
+    }
+    return null
+  }
+
+  /** The friend config to save, or null when this is an ordinary prediction. */
+  const friendConfig = (): FriendConfig | null => {
+    if (!isPrivate || friendError() !== null) return null
+    return { invited: uniqueInvited, judge, voteWindowSeconds: voteWindow }
+  }
+
   const handleAddToCart = () => {
     if (!result) return
     setCart(prev => [...prev, { key: nextKey.current++, result, image }])
@@ -251,7 +323,7 @@ export default function SubmitPrediction({ isConnected, address }: { isConnected
       setTripleIds([onChain.tripleId])
 
       const dbError = await insertPredictionRows([
-        toDbRow(result, onChain.tripleId, address ?? '', image?.url ?? null),
+        toDbRow(result, onChain.tripleId, address ?? '', image?.url ?? null, friendConfig()),
       ])
       if (dbError) {
         // The Triple is already real on-chain; this only affects the approval queue.
@@ -326,10 +398,12 @@ export default function SubmitPrediction({ isConnected, address }: { isConnected
   return (
     <div>
       <div style={{ fontSize: 22, fontWeight: 800, letterSpacing: '-0.5px', marginBottom: 4 }}>
-        submit a prediction
+        {pvpMode ? 'start a pvp market' : 'submit a prediction'}
       </div>
       <div style={{ fontSize: 13, color: 'var(--text-dim)', marginBottom: 20, fontFamily: 'var(--font-mono)' }}>
-        {'// type in plain english — somoco parses it with ai'}
+        {pvpMode
+          ? '// call it, invite your friends, settle it between you'
+          : '// type in plain english — somoco parses it with ai'}
       </div>
 
       {/* Trust score / eligibility banner */}
@@ -353,8 +427,9 @@ export default function SubmitPrediction({ isConnected, address }: { isConnected
         </div>
       )}
 
-      {/* Cart */}
-      {cart.length > 0 && (
+      {/* Cart. Never in PVP mode — the batch submit carries no per-item friend
+          config, so a friend market always goes on its own. */}
+      {!pvpMode && cart.length > 0 && (
         <div style={{
           background: 'var(--bg-card)', border: '1px solid var(--accent-border)',
           borderRadius: 14, padding: 16, marginBottom: 16,
@@ -542,6 +617,107 @@ export default function SubmitPrediction({ isConnected, address }: { isConnected
             )}
           </div>
 
+          {/* Who's playing. An optional disclosure on the normal submit page;
+              the whole point of the page in PVP mode, so no toggle there. */}
+          <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
+            {!pvpMode && (
+              <button
+                onClick={() => setPrivateToggle(v => !v)}
+                disabled={step === 'parsing'}
+                style={{
+                  background: 'transparent', border: 'none', cursor: 'pointer', padding: 0,
+                  fontSize: 12, fontFamily: 'var(--font-mono)',
+                  color: isPrivate ? 'var(--purple)' : 'var(--text-dim)',
+                }}
+              >
+                {isPrivate ? '▾' : '▸'} bet against friends instead (optional)
+              </button>
+            )}
+
+            {isPrivate && (
+              <div style={{
+                marginTop: 10, padding: 14, borderRadius: 10,
+                background: 'var(--purple-bg)', border: '1px solid var(--purple-border)',
+              }}>
+                {!pvpMode && (
+                  <p style={{ fontSize: 12.5, fontWeight: 400, lineHeight: 1.65, color: 'var(--text-muted)' }}>
+                    This one stays out of the public feed, and <strong style={{ color: 'var(--text)' }}>you settle
+                    it yourselves</strong> — not somoco. On the resolution date everyone invited votes on what
+                    happened. Agree, and it pays out instantly. Disagree, and the judge decides.
+                  </p>
+                )}
+
+                <label style={{ display: 'block', marginTop: 12, fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: 1 }}>
+                  friends’ wallets (2–{MAX_VOTERS})
+                </label>
+                <textarea
+                  value={invitesText}
+                  onChange={e => setInvitesText(e.target.value)}
+                  rows={3}
+                  placeholder={'0xabc…\n0xdef…'}
+                  disabled={step === 'parsing'}
+                  style={{
+                    width: '100%', marginTop: 6, background: '#0a0a0a',
+                    border: '1px solid var(--border)', borderRadius: 10, padding: '10px 12px',
+                    color: 'var(--text)', fontSize: 13, fontFamily: 'var(--font-mono)',
+                    resize: 'none', outline: 'none', lineHeight: 1.6,
+                  }}
+                />
+                {uniqueInvited.length > 0 && (
+                  <div style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', marginTop: 4 }}>
+                    {uniqueInvited.length} invited
+                  </div>
+                )}
+
+                <label style={{ display: 'block', marginTop: 12, fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: 1 }}>
+                  judge — decides if you disagree, and can’t bet
+                </label>
+                <input
+                  value={judgeText}
+                  onChange={e => setJudgeText(e.target.value)}
+                  placeholder="0x…"
+                  disabled={step === 'parsing'}
+                  style={{
+                    width: '100%', marginTop: 6, background: '#0a0a0a',
+                    border: '1px solid var(--border)', borderRadius: 10, padding: '10px 12px',
+                    color: 'var(--text)', fontSize: 13, fontFamily: 'var(--font-mono)', outline: 'none',
+                  }}
+                />
+
+                <label style={{ display: 'block', marginTop: 12, fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: 1 }}>
+                  how long to vote before the judge steps in
+                </label>
+                <div style={{ display: 'flex', gap: 8, marginTop: 6, flexWrap: 'wrap' }}>
+                  {VOTE_WINDOW_PRESETS.map(preset => (
+                    <button
+                      key={preset.seconds}
+                      onClick={() => setVoteWindow(preset.seconds)}
+                      className="chip"
+                      style={{
+                        borderColor: voteWindow === preset.seconds ? 'var(--purple)' : undefined,
+                        color: voteWindow === preset.seconds ? 'var(--purple)' : undefined,
+                      }}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+
+                {friendError() && (
+                  <div style={{ marginTop: 10, fontSize: 12, fontFamily: 'var(--font-mono)', color: '#e6a832' }}>
+                    ⚠ {friendError()}
+                  </div>
+                )}
+
+                <p style={{ marginTop: 12, fontSize: 11.5, fontWeight: 400, lineHeight: 1.6, color: 'var(--text-dim)' }}>
+                  Private means hidden from somoco’s feed — the claim itself is still written to
+                  Intuition, where it is public and permanent forever. Your friends each need
+                  $TRUST to bet with and a little for gas.
+                </p>
+              </div>
+            )}
+          </div>
+
           <div style={{
             display: 'flex', alignItems: 'center', justifyContent: 'space-between',
             marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--border)',
@@ -698,7 +874,9 @@ export default function SubmitPrediction({ isConnected, address }: { isConnected
                   {'// how it resolves'}
                 </span>
                 <span style={{ fontSize: 11, color: 'var(--accent)', fontFamily: 'var(--font-mono)' }}>
-                  {METHOD_LABELS[result.resolutionPlan.method] ?? result.resolutionPlan.method}
+                  {isPrivate
+                    ? '⚔ your friends decide'
+                    : METHOD_LABELS[result.resolutionPlan.method] ?? result.resolutionPlan.method}
                 </span>
               </div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
@@ -709,7 +887,10 @@ export default function SubmitPrediction({ isConnected, address }: { isConnected
               <div style={{ fontSize: 13, color: 'var(--text)', lineHeight: 1.6 }}>
                 {result.resolutionPlan.criteria}
               </div>
-              {result.resolutionPlan.needsReview && (
+              {/* Never on a PVP market. finalizeResolutionPlan already forces
+                  needsReview off for those, so this is belt-and-braces against
+                  a stale parse result still sitting in state. */}
+              {!isPrivate && result.resolutionPlan.needsReview && (
                 <div style={{
                   background: '#1a150a', border: '1px solid #3d2f1a', borderRadius: 8,
                   padding: 10, marginTop: 10, fontSize: 12, color: '#e6a832',
@@ -742,21 +923,40 @@ export default function SubmitPrediction({ isConnected, address }: { isConnected
             </div>
           )}
 
+          {/* A half-filled friend market would silently save as an ordinary
+              public prediction, which is the opposite of what was asked for.
+              Better to block the button and say why. */}
+          {isPrivate && friendError() && (
+            <div style={{ marginBottom: 10, fontSize: 12, fontFamily: 'var(--font-mono)', color: '#e6a832' }}>
+              ⚠ friend market not ready: {friendError()}
+            </div>
+          )}
+
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-            <button onClick={handleSubmitOne} disabled={eligibilityBlocked}
+            <button onClick={handleSubmitOne} disabled={eligibilityBlocked || (isPrivate && friendError() !== null)}
               className="btn btn-accent"
-              style={{ borderRadius: 10, padding: '10px 22px', fontSize: 13 }}>
-              confirm &amp; submit now
-            </button>
-            <button onClick={handleAddToCart} disabled={eligibilityBlocked}
-              className="btn btn-yes"
               style={{
                 borderRadius: 10, padding: '10px 22px', fontSize: 13,
-                opacity: eligibilityBlocked ? 0.4 : 1,
-                cursor: eligibilityBlocked ? 'not-allowed' : 'pointer',
+                opacity: isPrivate && friendError() ? 0.4 : 1,
               }}>
-              + add to cart
+              confirm &amp; submit now
             </button>
+            {/* The cart submits many predictions in one pair of transactions and
+                carries no per-item friend config, so a private prediction has to
+                go on its own. Hidden outright on the PVP page, where every
+                prediction is private and the button could never be used. */}
+            {!pvpMode && (
+              <button onClick={handleAddToCart} disabled={eligibilityBlocked || isPrivate}
+                className="btn btn-yes"
+                title={isPrivate ? 'friend markets are submitted one at a time' : undefined}
+                style={{
+                  borderRadius: 10, padding: '10px 22px', fontSize: 13,
+                  opacity: eligibilityBlocked || isPrivate ? 0.4 : 1,
+                  cursor: eligibilityBlocked || isPrivate ? 'not-allowed' : 'pointer',
+                }}>
+                + add to cart
+              </button>
+            )}
             <button onClick={handleReset}
               className="btn btn-ghost"
               style={{ borderRadius: 10, padding: '10px 22px', fontSize: 13, fontWeight: 500 }}>

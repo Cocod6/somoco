@@ -21,7 +21,10 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin'
  * while the Triple was already on-chain. So we strip whichever column the error
  * names and retry, rather than losing the record.
  */
-const OPTIONAL_COLUMNS = ['category', 'resolution_plan', 'image_url'] as const
+const OPTIONAL_COLUMNS = [
+  'category', 'resolution_plan', 'image_url',
+  'is_private', 'invited_wallets', 'judge_wallet', 'vote_window_seconds',
+] as const
 
 /** Only these columns may be set by a submitter. Everything else is server-owned. */
 const ALLOWED_COLUMNS = [
@@ -34,6 +37,13 @@ const ALLOWED_COLUMNS = [
   'resolution_date',
   'resolution_plan',
   'image_url',
+  // Friend-market request. Safe for a submitter to set: it only asks to be kept
+  // out of the public feed and names who they want voting. The jury that
+  // actually decides the money is registered on-chain by the admin at approval.
+  'is_private',
+  'invited_wallets',
+  'judge_wallet',
+  'vote_window_seconds',
 ] as const
 
 /** Strips any client-supplied column that isn't submitter-owned. */

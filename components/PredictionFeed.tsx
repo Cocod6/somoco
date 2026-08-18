@@ -69,7 +69,12 @@ export default function PredictionFeed({ onSubmit, onOpen }: { onSubmit: () => v
         return
       }
 
-      const rows = data ?? []
+      // Friend markets are excluded here rather than in the query on purpose:
+      // `is_private` is a late column, and a WHERE clause naming a column the
+      // live DB doesn't have yet fails the whole request and empties the feed.
+      // Filtering in JS degrades to "everything is public", which is the old
+      // behaviour rather than a blank page.
+      const rows = (data ?? []).filter(p => p.is_private !== true)
       setPredictions(rows)
       setLoading(false)
     }

@@ -524,6 +524,168 @@ body > * {
   text-align: right;
 }
 
+/* --- Legal pages (/terms) ---
+   A standalone document route, not part of the app shell: one column, a wider
+   measure than the app's cards, and body text set at 400 weight because the
+   page-wide bold cut is unreadable over this many paragraphs. */
+.legal-shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.legal-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: var(--nav-h);
+  padding: 0 24px;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: rgba(10, 10, 10, 0.72);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+.legal-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
+  text-decoration: none;
+  transition: color 0.15s;
+}
+.legal-back:hover { color: var(--accent); }
+
+.legal-wrap {
+  flex: 1;
+  width: 100%;
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 48px 24px 72px;
+}
+
+.legal-title {
+  font-size: 34px;
+  font-weight: 800;
+  letter-spacing: -1px;
+  line-height: 1.1;
+}
+.legal-meta {
+  margin-top: 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.legal-lede {
+  margin-top: 20px;
+  font-size: 15px;
+  font-weight: 400;
+  line-height: 1.7;
+  color: var(--text-muted);
+}
+
+/* Contents list. Two columns on anything wider than a phone so twenty sections
+   don't push the document itself below the fold. */
+.legal-toc {
+  margin-top: 28px;
+  padding: 18px 20px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-card);
+  columns: 2;
+  column-gap: 24px;
+}
+.legal-toc a {
+  display: block;
+  break-inside: avoid;
+  padding: 3px 0;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-muted);
+  text-decoration: none;
+  transition: color 0.15s;
+}
+.legal-toc a:hover { color: var(--accent); }
+
+.legal-section {
+  margin-top: 40px;
+  /* So an in-page jump (#risk) doesn't land the heading under the sticky bar. */
+  scroll-margin-top: calc(var(--nav-h) + 16px);
+}
+.legal-h2 {
+  font-size: 17px;
+  font-weight: 800;
+  letter-spacing: -0.3px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.legal-h3 {
+  margin-top: 22px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+}
+.legal-section p,
+.legal-section li {
+  margin-top: 12px;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.75;
+  color: #b9b5ad;
+}
+.legal-section ul {
+  margin-top: 4px;
+  padding-left: 20px;
+}
+.legal-section li { margin-top: 8px; }
+.legal-section strong { font-weight: 700; color: var(--text); }
+.legal-section a { color: var(--accent-text); text-decoration: underline; }
+.legal-section a:hover { color: var(--accent); }
+.legal-section code {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--text);
+  background: #171717;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+/* Callout for the things a user genuinely must not miss. */
+.legal-callout {
+  margin-top: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--amber-border);
+  border-radius: 10px;
+  background: var(--amber-bg);
+}
+.legal-callout p { margin-top: 0; color: #e8c98a; }
+.legal-callout p + p { margin-top: 10px; }
+
+/* A blank the operator still has to fill in before launch. Deliberately loud —
+   these must not ship unnoticed. */
+.legal-blank {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--bg);
+  background: var(--accent);
+  border-radius: 3px;
+  padding: 1px 6px;
+  font-weight: 700;
+}
+
+@media (max-width: 560px) {
+  .legal-wrap { padding: 32px 16px 56px; }
+  .legal-title { font-size: 27px; }
+  .legal-toc { columns: 1; }
+  .legal-nav { padding: 0 14px; }
+}
+
 /* --- Card grid (feed) ---
    auto-fill rather than a fixed column count: the same rule gives three cards
    across beside the rail on a laptop, more on a wide monitor, and one on a

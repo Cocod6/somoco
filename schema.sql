@@ -34,6 +34,20 @@ alter table predictions add column if not exists resolution_plan jsonb;
 -- on Intuition is unaffected. See lib/predictions/imageUpload.ts.
 alter table predictions add column if not exists image_url text;
 
+-- Friend markets (PvP). A private prediction never appears in the public feed
+-- and is settled by the people invited to it rather than by Somoco — see
+-- docs/friend-markets-v1-spec.md and contracts/src/FriendJury.sol.
+--
+-- These four columns are only ever a REQUEST. Nothing here can settle anything:
+-- the binding version is the jury registered on-chain by the admin at approval
+-- time, and the contract reads its voters from itself, never from this table.
+-- (The RLS hole that made Supabase forgeable is exactly why the settlement
+-- contracts never trust it — same rule applies here.)
+alter table predictions add column if not exists is_private boolean not null default false;
+alter table predictions add column if not exists invited_wallets text[];
+alter table predictions add column if not exists judge_wallet text;
+alter table predictions add column if not exists vote_window_seconds integer;
+
 -- Feed/leaderboard queries hit these constantly.
 create index if not exists predictions_approval_idx on predictions (approval_status);
 create index if not exists predictions_creator_idx on predictions (lower(creator_address));

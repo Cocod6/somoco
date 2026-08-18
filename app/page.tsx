@@ -5,6 +5,7 @@ import WalletButton from '../components/WalletButton'
 import { useAccount } from 'wagmi'
 import PredictionFeed from '../components/PredictionFeed'
 import SubmitPrediction from '../components/SubmitPrediction'
+import PvpMarkets from '../components/PvpMarkets'
 import ExploreAtoms from '../components/ExploreAtoms'
 import ResolveAdmin from '../components/ResolveAdmin'
 import ApproveAdmin from '../components/ApproveAdmin'
@@ -18,7 +19,7 @@ import YourRail from '../components/YourRail'
 import SiteFooter from '../components/SiteFooter'
 import { useIsAdmin } from '../lib/admin'
 
-type Page = 'feed' | 'trending' | 'explore' | 'submit' | 'my' | 'resolve' | 'approve' | 'leaderboard'
+type Page = 'feed' | 'trending' | 'explore' | 'submit' | 'pvp' | 'my' | 'resolve' | 'approve' | 'leaderboard'
 
 // Hydration detector: false during SSR and the first client paint, true after.
 // (useSyncExternalStore's server snapshot vs client snapshot — no effect needed.)
@@ -46,6 +47,7 @@ export default function Home() {
     { id: 'leaderboard', label: 'Leaderboard', icon: '★', section: null, adminOnly: false },
     { id: 'explore', label: 'Explore atoms', icon: '◎', section: null, adminOnly: false },
     { id: 'submit', label: 'Submit prediction', icon: '+', section: 'create', adminOnly: false },
+    { id: 'pvp', label: 'PVP markets', icon: '⚔', section: null, adminOnly: false },
     { id: 'my', label: 'My predictions', icon: '◉', section: null, adminOnly: false },
     { id: 'approve', label: 'Approve', icon: '✓', section: 'admin', adminOnly: true },
     { id: 'resolve', label: 'Resolve', icon: '⚖', section: null, adminOnly: true },
@@ -148,6 +150,7 @@ export default function Home() {
               <>
                 {activePage === 'feed' && <PredictionFeed onSubmit={() => setActivePage('submit')} onOpen={setDetailId} />}
                 {activePage === 'submit' && <SubmitPrediction isConnected={isConnected} address={address} />}
+                {activePage === 'pvp' && <PvpMarkets isConnected={isConnected} address={address} onOpen={setDetailId} />}
                 {activePage === 'explore' && <ExploreAtoms />}
                 {activePage === 'resolve' && (
                   <AdminGate title="resolve predictions">

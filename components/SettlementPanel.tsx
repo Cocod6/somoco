@@ -15,6 +15,7 @@ import {
   unstakeFromMarket, UNSTAKE_PENALTY_BPS,
   type MarketInfo,
 } from '@/lib/predictions/settlement'
+import JuryPanel from './JuryPanel'
 
 export default function SettlementPanel({ termId }: { termId: Hex }) {
   const { address, isConnected } = useAccount()
@@ -131,6 +132,10 @@ export default function SettlementPanel({ termId }: { termId: Hex }) {
         </div>
         <StateChip state={info.state} />
       </div>
+
+      {/* Friend markets only: the group votes on the outcome here instead of
+          Somoco declaring it. Renders nothing for ordinary markets. */}
+      <JuryPanel market={info.address} onSettled={refresh} />
 
       {/* Pool split */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 14 }}>

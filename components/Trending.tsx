@@ -55,7 +55,9 @@ export default function Trending({ onOpen }: { onOpen: (id: string) => void }) {
         return
       }
 
-      const rows = data ?? []
+      // Friend markets never trend — they're private. Filtered in JS for the
+      // same reason as the feed (see PredictionFeed.tsx).
+      const rows = (data ?? []).filter(p => p.is_private !== true)
       const poolMap = await getPoolsForTerms(publicClient, rows.map(r => r.triple_id as Hex))
 
       const withPools: Ranked[] = rows.map(pred => ({

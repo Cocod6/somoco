@@ -26,6 +26,18 @@ export interface PredictionRecord {
   resolution_plan: ResolutionPlan | null
   /** Optional creator-attached image (public URL); null if none or column predates it */
   image_url: string | null
+  /**
+   * Friend market: kept out of the public feed, settled by the invited wallets
+   * instead of by Somoco. Undefined on rows predating the column, which is why
+   * every check is `=== true` rather than a truthiness test.
+   */
+  is_private?: boolean | null
+  /** Wallets invited to bet and to vote on the outcome (the requested jury). */
+  invited_wallets?: string[] | null
+  /** Requested tiebreaker — rules if the group disagrees. Must not bet. */
+  judge_wallet?: string | null
+  /** How long the group gets to vote before the judge may step in. */
+  vote_window_seconds?: number | null
   resolution_date: string | null
   approval_status: 'pending' | 'approved' | 'rejected'
   resolution_status: 'unresolved' | 'resolved_true' | 'resolved_false'

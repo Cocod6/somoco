@@ -14,12 +14,35 @@ import { signAdminAction } from '@/lib/adminSign'
 import {
   createMarketOnChain, acceptFactoryOwnership, getFactoryOwnership, getMarketAddress,
 } from '@/lib/predictions/settlement'
+import {
+  registerJury, juryIsLive, MAX_VOTERS,
+  MIN_VOTE_WINDOW_SECONDS, MAX_VOTE_WINDOW_SECONDS,
+} from '@/lib/predictions/friendJury'
 import ResolutionPlanBadge from './ResolutionPlanBadge'
 
 // Approving a prediction also creates its settlement pool (the money market).
 // Staking closes this many seconds before the resolution date — or halfway to
 // resolution when the date is nearer than that, so late approvals still work.
 const DEFAULT_LOCK_OFFSET = 24 * 60 * 60
+
+/**
+ * When a YYYY-MM-DD resolution date actually falls due: the END of that day in
+ * UTC, not the start.
+ *
+ * This used to be `T00:00:00Z`, which read "judgment day 2026-08-11" as the
+ * first instant of the 11th. Two things were wrong with that. A market dated
+ * today was ALWAYS already in the past, so it silently got no settlement pool —
+ * which is fatal for PVP, where "before 4pm today" is the most natural friend
+ * bet there is. And even for public markets it judged a day early: a prediction
+ * that resolves on the 31st shouldn't be settled at midnight as the 31st
+ * begins, before the thing has had its day to happen.
+ *
+ * End-of-day matches what a person means by a date, and it only affects markets
+ * created from here on — existing ones have their timestamps fixed on-chain.
+ */
+function resolutionUnixOf(dateISO: string): number {
+  return Math.floor(Date.parse(`${dateISO}T23:59:59Z`) / 1000)
+}
 
 // Create the prediction's money market on the settlement factory. The caller's
 // wallet must be the factory owner. Returns a human-readable outcome; throws
@@ -33,8 +56,7 @@ async function createSettlementMarket(
   if (!pred.resolution_date) {
     return { ok: false, message: `Approved, but no settlement pool: "${pred.subject}" has no resolution date.` }
   }
-  // The date column is YYYY-MM-DD; treat it as midnight UTC of that day.
-  const resolutionUnix = Math.floor(Date.parse(`${pred.resolution_date}T00:00:00Z`) / 1000)
+  const resolutionUnix = resolutionUnixOf(pred.resolution_date)
   const now = Math.floor(Date.now() / 1000)
   if (resolutionUnix <= now) {
     return { ok: false, message: `Approved, but no settlement pool: "${pred.subject}"'s resolution date is already past.` }
@@ -50,7 +72,57 @@ async function createSettlementMarket(
     pred.creator_address as Address
   )
   const locks = new Date((resolutionUnix - lockOffset) * 1000).toLocaleString()
+
+  // Friend market: hand the outcome to the people who bet, not to Somoco.
+  // Deliberately a SECOND transaction after the market exists — registerJury
+  // needs the market address, and keeping it separate means a failed jury
+  // leaves a working (Somoco-resolved) market rather than no market at all.
+  if (pred.is_private === true) {
+    const jury = await registerJuryFor(publicClient, walletClient, pred)
+    return { ok: true, message: `Approved — ${jury} Staking closes ${locks}.` }
+  }
+
   return { ok: true, message: `Approved — settlement pool is live, staking closes ${locks}.` }
+}
+
+/**
+ * Register the on-chain jury for a private prediction. Returns a sentence
+ * describing what happened — including the ways it can legitimately not happen,
+ * which the admin needs to see rather than have swallowed.
+ *
+ * The database row is only ever the creator's REQUEST. This is where it becomes
+ * binding, and the validation here is the gate: the contract will reject a bad
+ * jury anyway, but failing early gives the admin a readable reason.
+ */
+async function registerJuryFor(
+  publicClient: PublicClient,
+  walletClient: WalletClient,
+  pred: PredictionRecord
+): Promise<string> {
+  if (!(await juryIsLive(publicClient))) {
+    return 'settlement pool is live, but the friend jury is NOT — the FriendJury contract does not hold the resolver role, so Somoco still settles this one.'
+  }
+
+  const voters = (pred.invited_wallets ?? [])
+    .map(a => a.trim().toLowerCase())
+    .filter((a, i, all) => a.length > 0 && all.indexOf(a) === i) as Address[]
+  const judge = pred.judge_wallet?.trim().toLowerCase() as Address | undefined
+
+  if (!judge) return 'settlement pool is live, but no judge was named, so no jury was registered.'
+  if (voters.length < 2) return 'settlement pool is live, but fewer than 2 friends were invited, so no jury was registered.'
+  if (voters.length > MAX_VOTERS) return `settlement pool is live, but ${voters.length} voters exceeds the ${MAX_VOTERS} cap, so no jury was registered.`
+  if (voters.includes(judge)) return 'settlement pool is live, but the judge is also one of the voters, so no jury was registered.'
+
+  const window = pred.vote_window_seconds ?? 3 * 24 * 60 * 60
+  if (window < MIN_VOTE_WINDOW_SECONDS || window > MAX_VOTE_WINDOW_SECONDS) {
+    return 'settlement pool is live, but the voting window is out of range, so no jury was registered.'
+  }
+
+  const market = await getMarketAddress(publicClient, pred.triple_id as Hex)
+  if (!market) return 'settlement pool was created but could not be read back, so no jury was registered.'
+
+  await registerJury(publicClient, walletClient, market, voters, judge, window)
+  return `friend market is live — ${voters.length} friends decide it, ${judge.slice(0, 6)}…${judge.slice(-4)} judges.`
 }
 
 /**
@@ -78,7 +150,7 @@ async function findPredictionsMissingPools(
   for (const row of rows) {
     // No date, or a date already gone: createMarket would revert anyway.
     if (!row.resolution_date) continue
-    if (Math.floor(Date.parse(`${row.resolution_date}T00:00:00Z`) / 1000) <= nowSeconds) continue
+    if (resolutionUnixOf(row.resolution_date) <= nowSeconds) continue
     const market = await getMarketAddress(publicClient, row.triple_id as Hex)
     if (!market) missing.push(row)
   }

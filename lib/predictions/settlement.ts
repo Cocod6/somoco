@@ -32,6 +32,9 @@ export const factoryAbi = [
   },
   { type: 'function', name: 'owner', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
   { type: 'function', name: 'pendingOwner', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
+  // Who may declare outcomes right now — an EOA today, the FriendJury contract
+  // once friend markets go live. `resolveMarket()` reads this to route itself.
+  { type: 'function', name: 'resolver', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
   { type: 'function', name: 'acceptOwnership', stateMutability: 'nonpayable', inputs: [], outputs: [] },
   {
     type: 'function', name: 'createMarket', stateMutability: 'nonpayable',
@@ -388,7 +391,35 @@ export async function unstakeFromMarket(
   return hash
 }
 
-/** Resolver-only: declare the outcome once the market is locked. */
+/**
+ * The `adminResolve` passthrough on FriendJury. Declared here rather than
+ * imported from friendJury.ts on purpose: that module imports this one, and a
+ * cycle between them is exactly the kind of thing that resolves to `undefined`
+ * at runtime under a bundler.
+ */
+const resolverPassthroughAbi = [
+  {
+    type: 'function', name: 'adminResolve', stateMutability: 'nonpayable',
+    inputs: [{ name: 'market', type: 'address' }, { name: 'outcome', type: 'uint8' }],
+    outputs: [],
+  },
+] as const
+
+/**
+ * Resolver-only: declare the outcome once the market is locked.
+ *
+ * Routes itself. A market accepts `resolve()` only from whoever the factory
+ * currently calls `resolver`, and that role may be held either by the admin's
+ * own key (the original setup) or by the FriendJury contract (once friend
+ * markets go live). So: if the signer IS the resolver, call the market
+ * directly; otherwise assume the resolver is a contract holding the role on the
+ * signer's behalf and go through its `adminResolve`. Reading the answer from
+ * the chain means the handover needs no redeploy and no env flag, and no caller
+ * of this function has to know which world it is in.
+ *
+ * Note that a friend market cannot be resolved this way at all — FriendJury
+ * refuses `adminResolve` on a market with a jury, by design.
+ */
 export async function resolveMarket(
   publicClient: PublicClient,
   walletClient: WalletClient,
@@ -396,14 +427,29 @@ export async function resolveMarket(
   outcome: 'yes' | 'no'
 ): Promise<Hex> {
   const [account] = await walletClient.getAddresses()
-  const hash = await walletClient.writeContract({
-    address: market,
-    abi: marketAbi,
-    functionName: 'resolve',
-    args: [OUTCOME[outcome]],
-    account,
-    chain: walletClient.chain,
-  })
+  const resolver = await publicClient.readContract({
+    address: SETTLEMENT_FACTORY, abi: factoryAbi, functionName: 'resolver',
+  }) as Address
+
+  const signerIsResolver = resolver.toLowerCase() === account.toLowerCase()
+  const hash = signerIsResolver
+    ? await walletClient.writeContract({
+        address: market,
+        abi: marketAbi,
+        functionName: 'resolve',
+        args: [OUTCOME[outcome]],
+        account,
+        chain: walletClient.chain,
+      })
+    : await walletClient.writeContract({
+        address: resolver,
+        abi: resolverPassthroughAbi,
+        functionName: 'adminResolve',
+        args: [market, OUTCOME[outcome]],
+        account,
+        chain: walletClient.chain,
+      })
+
   await publicClient.waitForTransactionReceipt({ hash })
   return hash
 }
