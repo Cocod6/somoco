@@ -510,6 +510,27 @@ export default function ApproveAdmin() {
               <Pill color="var(--amber)">{pred.condition ?? 'no condition'}</Pill>
             </div>
 
+            {/* WHY THIS IS SITTING HERE. Auto-approval publishes anything that
+                clears the checks, so everything left in this queue failed one
+                on purpose — and without printing that reason the admin is
+                re-deriving a decision the server already made and explained.
+                Rows submitted before auto-approval existed have no note, and
+                simply show nothing. */}
+            {pred.approval_note && (
+              <div style={{
+                display: 'flex', gap: 8, alignItems: 'flex-start',
+                background: '#1a150a', border: '1px solid #3d2f1a', borderRadius: 10,
+                padding: '10px 12px', marginBottom: 14, fontSize: 12.5, lineHeight: 1.6,
+                color: 'var(--amber)',
+              }}>
+                <span aria-hidden>👁</span>
+                <span>
+                  <strong style={{ fontWeight: 700 }}>held for you: </strong>
+                  {pred.approval_note}
+                </span>
+              </div>
+            )}
+
             {/* The resolution contract — expanded by default so the admin can
                 judge it (and see any needs-review flag) before approving. */}
             <div style={{ marginBottom: 14 }}>

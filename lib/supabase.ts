@@ -50,6 +50,13 @@ export interface PredictionRecord {
   vote_window_seconds?: number | null
   resolution_date: string | null
   approval_status: 'pending' | 'approved' | 'rejected'
+  /**
+   * Who decided: 'auto' when it cleared the checks unread, otherwise the
+   * admin's address. Null on rows predating auto-approval.
+   */
+  approved_by?: string | null
+  /** The passed checks, or — for anything still pending — why it was held. */
+  approval_note?: string | null
   resolution_status: ResolutionStatus
   resolution_tx_hash: string | null
   /**
