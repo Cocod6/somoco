@@ -1,5 +1,6 @@
 'use client'
 
+import Link from 'next/link'
 import SomocoLogo from './SomocoLogo'
 import { SETTLEMENT_FACTORY } from '../lib/predictions/settlement'
 import { intuition } from '../lib/chain'
@@ -9,7 +10,14 @@ import { intuition } from '../lib/chain'
 // component with the whole app in its import graph) — page.tsx narrows it.
 type NavTarget = string
 
-export default function SiteFooter({ onNavigate }: { onNavigate: (page: NavTarget) => void }) {
+/**
+ * onNavigate is optional on purpose. The app itself is a single page whose
+ * "routes" are React state, so only app/page.tsx can switch them — a standalone
+ * route like /terms has no such state to change. Given no handler, the footer
+ * drops the in-app columns rather than rendering links that can't work, and the
+ * standalone page carries its own "back to somoco" link instead.
+ */
+export default function SiteFooter({ onNavigate }: { onNavigate?: (page: NavTarget) => void }) {
   const explorer = intuition.blockExplorers.default.url
 
   // In-app destinations. These are SPA state changes, not URLs, so they're
@@ -29,6 +37,7 @@ export default function SiteFooter({ onNavigate }: { onNavigate: (page: NavTarge
       head: 'participate',
       items: [
         { label: 'Submit a prediction', page: 'submit' },
+        { label: 'PVP markets', page: 'pvp' },
         { label: 'My predictions', page: 'my' },
       ],
     },
@@ -42,6 +51,7 @@ export default function SiteFooter({ onNavigate }: { onNavigate: (page: NavTarge
     { label: 'Intuition docs', href: 'https://intuition.box/docs' },
     { label: 'Block explorer', href: explorer },
     { label: 'Settlement contract', href: `${explorer}/address/${SETTLEMENT_FACTORY}` },
+    { label: 'somoco on X', href: 'https://x.com/somoco_app' },
   ]
 
   return (
@@ -62,7 +72,7 @@ export default function SiteFooter({ onNavigate }: { onNavigate: (page: NavTarge
           </div>
         </div>
 
-        {columns.map(col => (
+        {onNavigate && columns.map(col => (
           <nav key={col.head} className="footer-col" aria-label={col.head}>
             <div className="footer-head">{col.head}</div>
             {col.items.map(item => (
@@ -92,6 +102,13 @@ export default function SiteFooter({ onNavigate }: { onNavigate: (page: NavTarge
               <span className="footer-ext" aria-hidden="true">↗</span>
             </a>
           ))}
+        </nav>
+
+        <nav className="footer-col" aria-label="legal">
+          <div className="footer-head">legal</div>
+          <Link className="footer-link" href="/terms">Terms of use</Link>
+          <Link className="footer-link" href="/terms#risk">Risk disclosure</Link>
+          <Link className="footer-link" href="/terms#privacy">Privacy</Link>
         </nav>
       </div>
 

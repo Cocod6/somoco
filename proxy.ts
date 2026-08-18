@@ -20,12 +20,15 @@ import { GATE_COOKIE, cookieUnlocks, getAccessCode } from '@/lib/gate'
  *   that carry MIRROR_SECRET in an Authorization header and have no browser
  *   and no cookie. They already refuse callers without that secret, so the
  *   access code would add nothing but a broken mirror.
+ * - /terms is the agreement people are asked to accept. Terms you cannot read
+ *   without an invite code are not terms anyone can be held to, and the page is
+ *   a static document with nothing private on it.
  *
  * Everything else — pages and browser-called APIs alike — is behind the code.
  * The browser routes need no exception: the fetch that calls them carries the
  * same cookie the page was served with.
  */
-const ALWAYS_OPEN = ['/gate', '/api/gate', '/api/settle', '/api/polymarket/mirror']
+const ALWAYS_OPEN = ['/gate', '/api/gate', '/api/settle', '/api/polymarket/mirror', '/terms']
 
 function isAlwaysOpen(pathname: string): boolean {
   return ALWAYS_OPEN.some(p => pathname === p || pathname.startsWith(`${p}/`))
