@@ -13,7 +13,7 @@ import { useAccount, useWalletClient, usePublicClient, useChainId } from 'wagmi'
 import type { Hex } from 'viem'
 import { mockPredictions } from '@/lib/predictions/mockData'
 import { resolvePredictionOnChain } from '@/lib/predictions/resolveOnchain'
-import { getMarketAddress, readMarketInfo, resolveMarket } from '@/lib/predictions/settlement'
+import { getMarketAddress, readMarketInfo, resolveMarket, voidMarket } from '@/lib/predictions/settlement'
 import { signAdminAction } from '@/lib/adminSign'
 import { supabase, type PredictionRecord } from '@/lib/supabase'
 import type { ExternalResolutionRef } from '@/lib/predictions/types'
@@ -25,7 +25,7 @@ interface DisplayPrediction {
   condition: string
   resolutionDate: string
   creatorDisplay: string
-  status: 'pending' | 'resolved_true' | 'resolved_false'
+  status: 'pending' | AdminOutcome
   tripleId: Hex | null // null = fake test entry, real bytes32 = real prediction
   creatorAddress: string | null
   supabaseId: string | null // needed to update the database record on resolve
@@ -45,6 +45,19 @@ interface DisplayPrediction {
  *   null             — the source has NOT settled yet, or could not be read
  */
 type SourceOutcome = 'loading' | 'resolved_true' | 'resolved_false' | null
+
+/**
+ * What an admin can record. 'voided' is not a verdict — it says the question
+ * stopped being answerable, so every stake is refunded fee-free and nobody's
+ * record is touched. See lib/supabase.ts ResolutionStatus.
+ */
+type AdminOutcome = 'resolved_true' | 'resolved_false' | 'voided'
+
+/** The explanation stored alongside an outcome so users need not just trust it. */
+interface Receipt {
+  sourceUrl: string
+  note: string
+}
 
 function daysUntil(resolutionDate: string): number {
   // Parse "YYYY-MM-DD" as LOCAL midnight — new Date(string) would read it as
@@ -172,8 +185,18 @@ export default function ResolveAdmin({ isConnected }: { isConnected: boolean }) 
     loadApproved()
   }, [])
 
-  const handleResolve = async (pred: DisplayPrediction, outcome: 'resolved_true' | 'resolved_false') => {
+  const handleResolve = async (
+    pred: DisplayPrediction,
+    outcome: AdminOutcome,
+    receipt: Receipt = { sourceUrl: '', note: '' }
+  ) => {
     setError(null)
+
+    // Voiding is a different act from resolving, not a third verdict: it asserts
+    // nothing about the world, so it writes NO outcome Triple — there is no
+    // claim to record on a permanent public graph. It only refunds the pool and
+    // notes in Somoco's own record that the question collapsed.
+    const isVoid = outcome === 'voided'
 
     // FAKE test prediction — just simulate locally, no wallet needed
     if (!pred.tripleId || !pred.creatorAddress) {
@@ -194,13 +217,25 @@ export default function ResolveAdmin({ isConnected }: { isConnected: boolean }) 
     // published result should never be a thing that happens by mis-click, least
     // of all on a market holding other people's money.
     const published = pred.external ? sourceOutcomes[pred.id] : undefined
-    if (published && published !== 'loading' && published !== outcome) {
+    if (!isVoid && published && published !== 'loading' && published !== outcome) {
       const sourceSays = published === 'resolved_true' ? 'YES' : 'NO'
       const youSay = outcome === 'resolved_true' ? 'YES' : 'NO'
       const confirmed = window.confirm(
         `Polymarket settled this ${sourceSays}. You are about to resolve it ${youSay}.\n\n` +
           `This overrides a published outcome that anyone can check, on a market that may hold other people's stakes.\n\n` +
           `Continue only if you are certain the source is wrong or is answering a different question.`
+      )
+      if (!confirmed) return
+    }
+
+    // The mirror image of the guard above. Voiding a question the source DID
+    // answer refunds the people who called it right — it takes their winnings
+    // away just as surely as resolving the wrong way would.
+    if (isVoid && published && published !== 'loading') {
+      const sourceSays = published === 'resolved_true' ? 'YES' : 'NO'
+      const confirmed = window.confirm(
+        `Polymarket settled this ${sourceSays}. Voiding refunds everyone instead of paying whoever was right.\n\n` +
+          `Void only if the question itself collapsed — not because the outcome is awkward.`
       )
       if (!confirmed) return
     }
@@ -217,7 +252,10 @@ export default function ResolveAdmin({ isConnected }: { isConnected: boolean }) 
       settlementMarket = await getMarketAddress(publicClient, pred.tripleId)
       if (settlementMarket) {
         const info = await readMarketInfo(publicClient, settlementMarket)
-        if (info.state === 'open') {
+        // void() is reachable from Open as well as Locked (contract §8) — a
+        // market that is obviously broken should not have to wait for its lock
+        // to pass before everyone can be refunded.
+        if (info.state === 'open' && !isVoid) {
           const locks = new Date(info.lockAt * 1000).toLocaleString()
           setError(`The settlement pool is still open for staking (locks ${locks}). Resolve after it locks.`)
           setResolvingId(null)
@@ -232,36 +270,51 @@ export default function ResolveAdmin({ isConnected }: { isConnected: boolean }) 
       settlementMarket = null // fail open: Triple resolution can proceed without the pool
     }
 
-    try {
-      const result = await resolvePredictionOnChain({
-        publicClient,
-        walletClient,
-        chainId,
-        predictionTripleId: pred.tripleId,
-        creatorAddress: pred.creatorAddress,
-        outcome: outcome === 'resolved_true' ? 'true' : 'false',
-      })
-      setLastTxHash(result.txHash)
-      setResolutionLinks(prev => ({
-        ...prev,
-        [pred.id]: { resolution: result.resolutionTripleId, reputation: result.reputationTripleId },
-      }))
+    const verb = isVoid ? 'Voided' : 'Resolved'
 
-      // Settle the money pool (if one exists and is locked): declares the
-      // outcome on the PredictionMarket contract so winners can claim.
-      // The connected admin wallet must be the contract's resolver.
-      if (settlementMarket) {
-        try {
-          const marketTx = await resolveMarket(
-            publicClient,
-            walletClient,
-            settlementMarket,
-            outcome === 'resolved_true' ? 'yes' : 'no'
-          )
-          setLastTxHash(marketTx)
-        } catch (err) {
-          const message = err instanceof Error ? err.message.split('\n')[0] : 'settlement failed'
-          setError(`Triples resolved, but the settlement pool did not settle: ${message}`)
+    try {
+      let onChainTxHash: string | null = null
+
+      if (isVoid) {
+        // No Triple is written. A void is the absence of an answer, and the
+        // graph should not carry an assertion that nothing happened.
+        if (settlementMarket) {
+          const voidTx = await voidMarket(publicClient, walletClient, settlementMarket)
+          onChainTxHash = voidTx
+          setLastTxHash(voidTx)
+        }
+      } else {
+        const result = await resolvePredictionOnChain({
+          publicClient,
+          walletClient,
+          chainId,
+          predictionTripleId: pred.tripleId,
+          creatorAddress: pred.creatorAddress,
+          outcome: outcome === 'resolved_true' ? 'true' : 'false',
+        })
+        onChainTxHash = result.txHash
+        setLastTxHash(result.txHash)
+        setResolutionLinks(prev => ({
+          ...prev,
+          [pred.id]: { resolution: result.resolutionTripleId, reputation: result.reputationTripleId },
+        }))
+
+        // Settle the money pool (if one exists and is locked): declares the
+        // outcome on the PredictionMarket contract so winners can claim.
+        // The connected admin wallet must be the contract's resolver.
+        if (settlementMarket) {
+          try {
+            const marketTx = await resolveMarket(
+              publicClient,
+              walletClient,
+              settlementMarket,
+              outcome === 'resolved_true' ? 'yes' : 'no'
+            )
+            setLastTxHash(marketTx)
+          } catch (err) {
+            const message = err instanceof Error ? err.message.split('\n')[0] : 'settlement failed'
+            setError(`Triples resolved, but the settlement pool did not settle: ${message}`)
+          }
         }
       }
 
@@ -278,7 +331,11 @@ export default function ResolveAdmin({ isConnected }: { isConnected: boolean }) 
             body: JSON.stringify({
               id: pred.supabaseId,
               outcome,
-              txHash: result.txHash,
+              txHash: onChainTxHash,
+              // The receipt. Who and when are set by the server from the
+              // signature and its own clock — a browser cannot claim either.
+              sourceUrl: receipt.sourceUrl || pred.external?.url || '',
+              note: receipt.note,
               auth,
             }),
           })
@@ -287,19 +344,30 @@ export default function ResolveAdmin({ isConnected }: { isConnected: boolean }) 
             // The chain is already updated — surface this without implying the
             // resolution itself failed, because it didn't.
             setError(
-              `Resolved on-chain, but Somoco's own record did not update: ${apiError ?? res.statusText}`
+              `${verb} on-chain, but Somoco's own record did not update: ${apiError ?? res.statusText}`
             )
+          } else {
+            // A stored outcome with no receipt is the old behaviour, not a
+            // failure — but say so, because the whole point was the receipt.
+            const { receiptStored } = (await res.json().catch(() => ({}))) as {
+              receiptStored?: boolean
+            }
+            if (receiptStored === false) {
+              setError(
+                'Recorded, but the receipt columns are missing — re-run schema.sql in Supabase.'
+              )
+            }
           }
         } catch (err) {
           const message = err instanceof Error ? err.message : 'signature declined'
-          setError(`Resolved on-chain, but Somoco's own record did not update: ${message}`)
+          setError(`${verb} on-chain, but Somoco's own record did not update: ${message}`)
         }
       }
 
       setPredictions(prev => prev.map(p => (p.id === pred.id ? { ...p, status: outcome } : p)))
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Resolution failed.'
-      setError(`On-chain resolution failed: ${message}`)
+      setError(`On-chain ${isVoid ? 'void' : 'resolution'} failed: ${message}`)
     } finally {
       setResolvingId(null)
     }
@@ -403,12 +471,18 @@ function PredictionCard({
   sourceOutcome,
 }: {
   prediction: DisplayPrediction
-  onResolve: (pred: DisplayPrediction, outcome: 'resolved_true' | 'resolved_false') => void
+  onResolve: (pred: DisplayPrediction, outcome: AdminOutcome, receipt: Receipt) => void
   isResolving: boolean
   portalLinks?: { resolution: string; reputation: string | null }
   /** undefined = not a mirrored prediction, so there is nothing to confirm. */
   sourceOutcome?: SourceOutcome
 }) {
+  // The receipt is captured per card, right next to the verdict it explains.
+  // A mirrored prediction arrives with its source link already filled in —
+  // the commonest receipt should cost the admin nothing to include.
+  const [sourceUrl, setSourceUrl] = useState(prediction.external?.url ?? '')
+  const [note, setNote] = useState('')
+
   const status = statusLabel(prediction.resolutionDate)
   const isResolved = prediction.status !== 'pending'
   const isReal = prediction.tripleId !== null
@@ -471,10 +545,42 @@ function PredictionCard({
         <SourceOutcomeBanner outcome={sourceOutcome} url={prediction.external?.url} />
       )}
 
+      {/* The receipt, captured before the verdict rather than after: users see
+          "resolved false" and currently have to take Somoco's word for it. A
+          link and a sentence are the difference between a record and a claim. */}
+      {!isResolved && (
+        <div style={{ marginBottom: 12, display: 'grid', gap: 8 }}>
+          <input
+            type="url"
+            value={sourceUrl}
+            onChange={e => setSourceUrl(e.target.value)}
+            placeholder="source url — where anyone can check this (optional)"
+            style={{
+              width: '100%', padding: '9px 12px', fontSize: 12,
+              fontFamily: 'var(--font-mono)', background: '#0a0a0a',
+              border: '1px solid var(--border)', borderRadius: 8,
+              color: 'var(--text)',
+            }}
+          />
+          <input
+            type="text"
+            value={note}
+            onChange={e => setNote(e.target.value)}
+            maxLength={500}
+            placeholder="why, in one line — shown to everyone who staked (optional)"
+            style={{
+              width: '100%', padding: '9px 12px', fontSize: 12,
+              background: '#0a0a0a', border: '1px solid var(--border)',
+              borderRadius: 8, color: 'var(--text)',
+            }}
+          />
+        </div>
+      )}
+
       {!isResolved ? (
         <div style={{ display: 'flex', gap: 10 }}>
           <button
-            onClick={() => onResolve(prediction, 'resolved_true')}
+            onClick={() => onResolve(prediction, 'resolved_true', { sourceUrl, note })}
             disabled={isResolving}
             className="btn btn-yes"
             style={{
@@ -489,7 +595,7 @@ function PredictionCard({
                 : '✓ mark true'}
           </button>
           <button
-            onClick={() => onResolve(prediction, 'resolved_false')}
+            onClick={() => onResolve(prediction, 'resolved_false', { sourceUrl, note })}
             disabled={isResolving}
             className="btn btn-no"
             style={{
@@ -499,18 +605,36 @@ function PredictionCard({
           >
             {sourceOutcome === 'resolved_false' ? '✗ confirm FALSE' : '✗ mark false'}
           </button>
+
+          {/* Third exit, deliberately smaller and last: the honest answer when
+              the question collapsed. Refunds everyone fee-free. Before this
+              existed, such a market's only ways out were a coin-flip verdict
+              or waiting 30 days for the permissionless timeout. */}
+          <button
+            onClick={() => onResolve(prediction, 'voided', { sourceUrl, note })}
+            disabled={isResolving}
+            title="Refund everyone — use when the question can no longer be answered"
+            style={{
+              padding: '10px 14px', fontSize: 13, borderRadius: 10, cursor: 'pointer',
+              background: 'transparent', color: 'var(--text-muted)',
+              border: '1px solid var(--border)',
+              opacity: isResolving ? 0.5 : 1,
+            }}
+          >
+            ⊘ void
+          </button>
         </div>
       ) : (
         <div>
           <div style={{
             display: 'inline-flex', alignItems: 'center', gap: 6,
-            background: prediction.status === 'resolved_true' ? 'var(--accent-dark)' : '#1a0a0a',
-            color: prediction.status === 'resolved_true' ? 'var(--accent)' : '#ff6b6b',
-            border: `1px solid ${prediction.status === 'resolved_true' ? 'var(--accent-border)' : '#3d1a1a'}`,
+            background: outcomeStyle(prediction.status).bg,
+            color: outcomeStyle(prediction.status).color,
+            border: `1px solid ${outcomeStyle(prediction.status).border}`,
             borderRadius: 999, padding: '5px 14px', fontSize: 12, fontWeight: 700,
             marginBottom: 10,
           }}>
-            {prediction.status === 'resolved_true' ? '✓ resolved true' : '✗ resolved false'}
+            {outcomeStyle(prediction.status).text}
           </div>
 
           <div style={{
@@ -565,6 +689,22 @@ function PredictionCard({
  * action is the one that reads as the default. Deliberately a fade and not a
  * disable — overriding the source has to stay possible, just never accidental.
  */
+/**
+ * How a finished prediction reads. Voided is intentionally grey, not red or
+ * green: nobody was right and nobody was wrong, everyone got their stake back.
+ */
+function outcomeStyle(status: 'pending' | AdminOutcome): {
+  text: string; bg: string; color: string; border: string
+} {
+  if (status === 'resolved_true') {
+    return { text: '✓ resolved true', bg: 'var(--accent-dark)', color: 'var(--accent)', border: 'var(--accent-border)' }
+  }
+  if (status === 'voided') {
+    return { text: '⊘ voided — everyone refunded', bg: '#141414', color: 'var(--text-muted)', border: 'var(--border)' }
+  }
+  return { text: '✗ resolved false', bg: '#1a0a0a', color: '#ff6b6b', border: '#3d1a1a' }
+}
+
 function dimUnless(outcome: SourceOutcome | undefined, side: 'resolved_true' | 'resolved_false'): number {
   if (outcome === 'resolved_true' || outcome === 'resolved_false') return outcome === side ? 1 : 0.4
   return 1

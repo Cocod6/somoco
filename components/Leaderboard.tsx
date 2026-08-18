@@ -44,6 +44,11 @@ export default function Leaderboard() {
 
       const grouped = new Map<string, { correct: number; incorrect: number }>()
       for (const row of data ?? []) {
+        // A voided prediction was never answered — the question collapsed and
+        // everyone was refunded. Counting it either way would be a verdict; even
+        // creating an empty 0/0 entry would put someone on the leaderboard for a
+        // market that never resolved.
+        if (row.resolution_status === 'voided') continue
         const key = row.creator_address.toLowerCase()
         const entry = grouped.get(key) ?? { correct: 0, incorrect: 0 }
         if (row.resolution_status === 'resolved_true') entry.correct += 1

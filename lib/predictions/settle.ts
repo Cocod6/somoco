@@ -124,6 +124,14 @@ async function loadCandidates(predictionId?: string): Promise<CandidateRow[]> {
   )
 }
 
+/** Columns added by the 2026-08-18 receipt migration — see schema.sql. */
+const RECEIPT_COLUMNS = [
+  'resolution_source_url',
+  'resolution_note',
+  'resolved_at',
+  'resolved_by',
+] as const
+
 export async function runSettlement(options: SettleOptions = {}): Promise<SettleReport> {
   const dryRun = options.dryRun !== false
   const limit = Math.min(Math.max(options.limit ?? 10, 1), 50)
@@ -256,10 +264,28 @@ export async function runSettlement(options: SettleOptions = {}): Promise<Settle
       // Somoco's own record last: if the on-chain write above failed, the
       // prediction stays unresolved and the next run retries it cleanly.
       const db = supabaseAdmin()
-      const { error } = await db
-        .from('predictions')
-        .update({ resolution_status: outcome, resolution_tx_hash: txHash ?? null })
-        .eq('id', row.id)
+      const update: Record<string, unknown> = {
+        resolution_status: outcome,
+        resolution_tx_hash: txHash ?? null,
+        // The receipt. This path has the strongest one there is: the outcome
+        // was READ from the source, never judged, so the link is the whole
+        // justification and 'polymarket-settler' names the mechanism rather
+        // than a person — nobody exercised discretion here.
+        resolution_source_url: external.url ?? null,
+        resolution_note: 'Settled automatically from the source market’s published outcome.',
+        resolved_at: new Date().toISOString(),
+        resolved_by: 'polymarket-settler',
+      }
+      let { error } = await db.from('predictions').update(update).eq('id', row.id)
+
+      // Receipt columns are newer than this table. If schema.sql has not been
+      // re-run, record the outcome anyway rather than losing a settlement that
+      // already happened on-chain (same rule as insertPredictionRows).
+      if (error && RECEIPT_COLUMNS.some(column => error!.message.includes(column))) {
+        for (const column of RECEIPT_COLUMNS) delete update[column]
+        ;({ error } = await db.from('predictions').update(update).eq('id', row.id))
+        if (!error) item.error = 'Settled, but the receipt columns are missing — re-run schema.sql.'
+      }
       if (error) item.error = `Triple written but Somoco's record did not update: ${error.message}`
 
       report.settled.push(item)

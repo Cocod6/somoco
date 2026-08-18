@@ -87,6 +87,7 @@ export const marketAbi = [
     type: 'function', name: 'resolve', stateMutability: 'nonpayable',
     inputs: [{ name: 'outcome_', type: 'uint8' }], outputs: [],
   },
+  { type: 'function', name: 'void', stateMutability: 'nonpayable', inputs: [], outputs: [] },
   { type: 'function', name: 'claim', stateMutability: 'nonpayable', inputs: [], outputs: [] },
 ] as const
 
@@ -403,6 +404,11 @@ const resolverPassthroughAbi = [
     inputs: [{ name: 'market', type: 'address' }, { name: 'outcome', type: 'uint8' }],
     outputs: [],
   },
+  {
+    type: 'function', name: 'adminVoid', stateMutability: 'nonpayable',
+    inputs: [{ name: 'market', type: 'address' }],
+    outputs: [],
+  },
 ] as const
 
 /**
@@ -446,6 +452,54 @@ export async function resolveMarket(
         abi: resolverPassthroughAbi,
         functionName: 'adminResolve',
         args: [market, OUTCOME[outcome]],
+        account,
+        chain: walletClient.chain,
+      })
+
+  await publicClient.waitForTransactionReceipt({ hash })
+  return hash
+}
+
+/**
+ * Resolver-only: void the market. Every stake is refunded in full, fee-free.
+ *
+ * This is the honest answer to a question that stopped being answerable — the
+ * match was cancelled, the token delisted, the metric never defined. The
+ * alternative was picking YES or NO on a question nobody can check, which
+ * takes real money off whoever guessed the way the coin didn't land.
+ *
+ * Routes exactly like `resolveMarket`: straight to the market when the signer
+ * holds the resolver role, otherwise through the resolver contract's
+ * `adminVoid`. Unlike resolving, this works on friend markets too — FriendJury
+ * allows it deliberately, because voiding can only give money back.
+ *
+ * Reachable while the market is still Open as well as once Locked (§8), so a
+ * market that is obviously broken need not wait for its lock to pass.
+ */
+export async function voidMarket(
+  publicClient: PublicClient,
+  walletClient: WalletClient,
+  market: Address
+): Promise<Hex> {
+  const [account] = await walletClient.getAddresses()
+  const resolver = await publicClient.readContract({
+    address: SETTLEMENT_FACTORY, abi: factoryAbi, functionName: 'resolver',
+  }) as Address
+
+  const signerIsResolver = resolver.toLowerCase() === account.toLowerCase()
+  const hash = signerIsResolver
+    ? await walletClient.writeContract({
+        address: market,
+        abi: marketAbi,
+        functionName: 'void',
+        account,
+        chain: walletClient.chain,
+      })
+    : await walletClient.writeContract({
+        address: resolver,
+        abi: resolverPassthroughAbi,
+        functionName: 'adminVoid',
+        args: [market],
         account,
         chain: walletClient.chain,
       })

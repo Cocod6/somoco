@@ -1,21 +1,77 @@
 // Somoco — resolution bookkeeping API
 // POST /api/admin/resolve
-// Body: { id, outcome: 'resolved_true' | 'resolved_false', txHash, auth: {...} }
+// Body: { id, outcome: 'resolved_true' | 'resolved_false' | 'voided',
+//         txHash?, sourceUrl?, note?, auth: {...} }
 //
 // Records the outcome of a resolution that ALREADY happened on-chain. The
 // on-chain write was never forgeable (it needs the admin wallet to sign a real
 // transaction) — but Somoco's own record of it was, with the anon key. This
 // route closes that gap so the DB can't claim a resolution that never happened.
+//
+// It also writes the RECEIPT: which source said so, why, when, and who. Two of
+// those four are deliberately not taken from the request body — see below.
 
 import { NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabaseAdmin'
 import { verifyAdmin, type AdminAuth } from '@/lib/adminAuth'
 
-const OUTCOMES = ['resolved_true', 'resolved_false'] as const
+const OUTCOMES = ['resolved_true', 'resolved_false', 'voided'] as const
 type Outcome = (typeof OUTCOMES)[number]
 
+/** Long enough to explain a resolution, short enough not to be a storage API. */
+const MAX_NOTE = 500
+const MAX_URL = 500
+
+/**
+ * Accepts an http(s) URL and nothing else.
+ *
+ * The receipt is rendered as a link users click, so a `javascript:` or `data:`
+ * URL here would be a stored redirect on Somoco's own admin-blessed surface.
+ * Anything unparseable is dropped rather than rejected — a bad link is not a
+ * reason to fail a resolution that already happened on-chain.
+ */
+function cleanUrl(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  const trimmed = raw.trim()
+  if (!trimmed || trimmed.length > MAX_URL) return null
+  try {
+    const url = new URL(trimmed)
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
+    return url.toString()
+  } catch {
+    return null
+  }
+}
+
+function cleanNote(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  const trimmed = raw.trim()
+  return trimmed ? trimmed.slice(0, MAX_NOTE) : null
+}
+
+/**
+ * Columns added by the 2026-08-18 receipt migration. If schema.sql has not been
+ * re-run yet, PostgREST rejects the whole update naming the missing column —
+ * and a resolution that already happened on-chain must never be lost to a
+ * pending migration. So we strip whichever column it names and retry, exactly
+ * as insertPredictionRows does on the submit path.
+ */
+const RECEIPT_COLUMNS = [
+  'resolution_source_url',
+  'resolution_note',
+  'resolved_at',
+  'resolved_by',
+] as const
+
 export async function POST(request: Request) {
-  let body: { id?: string; outcome?: string; txHash?: string; auth?: Partial<AdminAuth> }
+  let body: {
+    id?: string
+    outcome?: string
+    txHash?: string
+    sourceUrl?: string
+    note?: string
+    auth?: Partial<AdminAuth>
+  }
   try {
     body = await request.json()
   } catch {
@@ -29,7 +85,7 @@ export async function POST(request: Request) {
   }
   if (!outcome || !OUTCOMES.includes(outcome as Outcome)) {
     return NextResponse.json(
-      { error: "outcome must be 'resolved_true' or 'resolved_false'." },
+      { error: "outcome must be 'resolved_true', 'resolved_false' or 'voided'." },
       { status: 400 }
     )
   }
@@ -49,15 +105,44 @@ export async function POST(request: Request) {
     )
   }
 
-  const { error } = await db
-    .from('predictions')
-    .update({ resolution_status: outcome, resolution_tx_hash: txHash ?? null })
-    .eq('id', id)
-
-  if (error) {
-    console.error('resolve update failed:', error.message)
-    return NextResponse.json({ error: error.message }, { status: 500 })
+  // The two halves of the receipt that the client does NOT get to state:
+  // WHO resolved it is the address the signature was recovered from (verifyAdmin
+  // has just proven it), and WHEN is the server's own clock. A browser can
+  // claim neither — otherwise the receipt would be exactly as forgeable as the
+  // resolution record this route exists to protect.
+  const update: Record<string, unknown> = {
+    resolution_status: outcome,
+    resolution_tx_hash: txHash ?? null,
+    resolution_source_url: cleanUrl(body.sourceUrl),
+    resolution_note: cleanNote(body.note),
+    resolved_at: new Date().toISOString(),
+    resolved_by: auth!.address!.toLowerCase(),
   }
 
-  return NextResponse.json({ ok: true })
+  const missingColumns: string[] = []
+
+  for (;;) {
+    const { error } = await db.from('predictions').update(update).eq('id', id)
+    if (!error) {
+      return NextResponse.json({
+        ok: true,
+        // Tell the caller plainly if the receipt could not be stored, so the UI
+        // can say "resolved, receipt not saved" instead of implying it was.
+        receiptStored: missingColumns.length === 0,
+        ...(missingColumns.length ? { missingColumns } : {}),
+      })
+    }
+
+    const dropped = RECEIPT_COLUMNS.find(
+      column => column in update && error.message.includes(column)
+    )
+    if (!dropped) {
+      console.error('resolve update failed:', error.message)
+      return NextResponse.json({ error: error.message }, { status: 500 })
+    }
+
+    console.warn(`resolve: column ${dropped} missing — run schema.sql. Retrying without it.`)
+    delete update[dropped]
+    missingColumns.push(dropped)
+  }
 }

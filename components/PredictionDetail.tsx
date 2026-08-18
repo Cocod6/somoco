@@ -13,6 +13,7 @@ import { supabase, type PredictionRecord } from '@/lib/supabase'
 import { CATEGORIES, categorize } from '@/lib/predictions/categories'
 import ResolutionPlanBadge from './ResolutionPlanBadge'
 import SettlementPanel from './SettlementPanel'
+import ResolutionReceipt from './ResolutionReceipt'
 
 function shortAddr(a: string): string {
   return `${a.slice(0, 6)}...${a.slice(-4)}`
@@ -124,19 +125,9 @@ export default function PredictionDetail({ predictionId, onBack }: { predictionI
         />
       )}
 
-      {/* Resolved banner (open predictions won't hit this, but detail can be
-          reached for resolved ones too) */}
-      {resolved && (
-        <div style={{
-          display: 'inline-flex', alignItems: 'center', gap: 8,
-          background: pred.resolution_status === 'resolved_true' ? 'var(--accent-dark)' : '#1a0a0a',
-          color: pred.resolution_status === 'resolved_true' ? 'var(--accent)' : '#ff6b6b',
-          border: `1px solid ${pred.resolution_status === 'resolved_true' ? 'var(--accent-border)' : '#3d1a1a'}`,
-          borderRadius: 999, padding: '6px 16px', fontSize: 13, fontWeight: 700, marginBottom: 20,
-        }}>
-          {pred.resolution_status === 'resolved_true' ? '✓ resolved TRUE' : '✗ resolved FALSE'}
-        </div>
-      )}
+      {/* Outcome + the receipt behind it: the source anyone can open, why, and
+          who recorded it. Renders nothing while the prediction is still open. */}
+      {resolved && <ResolutionReceipt prediction={pred} />}
 
       {/* THE market — stake, watch the pools, claim. Renders nothing when no
           settlement pool exists (e.g. predictions approved without a date). */}

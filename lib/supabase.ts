@@ -13,6 +13,16 @@ const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? ''
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey)
 
+/**
+ * How a prediction ended.
+ *
+ * 'voided' is not a third outcome — it is the ABSENCE of one. The question
+ * collapsed (the match was cancelled, the pair delisted, the metric never
+ * defined) so nobody was right, the contract refunds every stake fee-free,
+ * and it must never count for or against anyone's record.
+ */
+export type ResolutionStatus = 'unresolved' | 'resolved_true' | 'resolved_false' | 'voided'
+
 export interface PredictionRecord {
   id: string
   triple_id: string
@@ -40,8 +50,22 @@ export interface PredictionRecord {
   vote_window_seconds?: number | null
   resolution_date: string | null
   approval_status: 'pending' | 'approved' | 'rejected'
-  resolution_status: 'unresolved' | 'resolved_true' | 'resolved_false'
+  resolution_status: ResolutionStatus
   resolution_tx_hash: string | null
+  /**
+   * The resolution receipt. All four are null for anything resolved before
+   * 2026-08-18 — an empty receipt is honest, a fabricated one is not.
+   */
+  resolution_source_url?: string | null
+  /** Why, in the resolver's own words. The only free text a user ever sees here. */
+  resolution_note?: string | null
+  resolved_at?: string | null
+  /**
+   * The address the SERVER recovered from the admin signature, or
+   * 'polymarket-settler' when the outcome was read mechanically from the
+   * source. Never accepted from the client.
+   */
+  resolved_by?: string | null
   created_at: string
 }
 

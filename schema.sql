@@ -48,6 +48,36 @@ alter table predictions add column if not exists invited_wallets text[];
 alter table predictions add column if not exists judge_wallet text;
 alter table predictions add column if not exists vote_window_seconds integer;
 
+-- ---------------------------------------------------------------------------
+-- Resolution receipt (2026-08-18)
+--
+-- Until now a resolution left no trace of WHY. Users saw "resolved false" and
+-- had to take Somoco's word for it. These four columns are the receipt: what
+-- source said so, any explanation, when it was recorded, and which address
+-- recorded it. Nullable on purpose — every row resolved before today
+-- legitimately has no receipt, and pretending otherwise would be a worse lie
+-- than an empty field.
+--
+-- `resolved_by` is the wallet the server RECOVERED from the admin signature,
+-- or the string 'polymarket-settler' when the mechanical settler read the
+-- outcome from the source itself. It is never taken from the request body.
+-- ---------------------------------------------------------------------------
+alter table predictions add column if not exists resolution_source_url text;
+alter table predictions add column if not exists resolution_note text;
+alter table predictions add column if not exists resolved_at timestamptz;
+alter table predictions add column if not exists resolved_by text;
+
+-- `resolution_status` gains a fourth value: 'voided'. The contract has always
+-- had void() (a question that collapsed — the match cancelled, the pair
+-- delisted, the metric undefined — refunds everyone fee-free), but Somoco's
+-- own record had nowhere to put it, so a collapsed market's only exits were a
+-- coin-flip resolution or waiting 30 days for the permissionless timeout.
+--
+-- The column is plain text with no check constraint, so no migration is needed
+-- for the value itself; this comment is the documentation.
+comment on column predictions.resolution_status is
+  'unresolved | resolved_true | resolved_false | voided';
+
 -- Feed/leaderboard queries hit these constantly.
 create index if not exists predictions_approval_idx on predictions (approval_status);
 create index if not exists predictions_creator_idx on predictions (lower(creator_address));

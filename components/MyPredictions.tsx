@@ -20,6 +20,7 @@ import { getMyStakedTerms } from '@/lib/predictions/settlement'
 import { CATEGORIES, categorize } from '@/lib/predictions/categories'
 import ResolutionPlanBadge from './ResolutionPlanBadge'
 import SettlementPanel from './SettlementPanel'
+import ResolutionReceipt from './ResolutionReceipt'
 
 type GroupId = 'submitted' | 'open' | 'closed' | 'staked'
 
@@ -47,6 +48,8 @@ function statusChip(p: PredictionRecord): { text: string; color: string; bg: str
     return { text: '✓ resolved true', color: 'var(--accent)', bg: 'var(--accent-dark)', border: 'var(--accent-border)' }
   if (p.resolution_status === 'resolved_false')
     return { text: '✗ resolved false', color: '#ff6b6b', bg: '#1a0a0a', border: '#3d1a1a' }
+  if (p.resolution_status === 'voided')
+    return { text: '⊘ voided — refunded', color: 'var(--text-muted)', bg: '#141414', border: 'var(--border)' }
   if (p.approval_status === 'approved')
     return { text: 'open', color: '#7ab832', bg: '#0f1a0a', border: '#2a3d1a' }
   if (p.approval_status === 'rejected')
@@ -305,6 +308,15 @@ function PredictionCard({
         plan={pred.resolution_plan}
         showReviewFlag={pred.approval_status === 'pending'}
       />
+
+      {/* Why it ended the way it did. Sits directly above the claim button, so
+          whoever is about to collect (or discover they can't) reads the source
+          in the same glance. */}
+      {pred.resolution_status !== 'unresolved' && (
+        <div style={{ marginTop: 12 }}>
+          <ResolutionReceipt prediction={pred} />
+        </div>
+      )}
 
       {/* Settlement pool: stake while open, CLAIM winnings/refunds here after
           resolution. Renders nothing if this prediction has no market. */}
