@@ -12,7 +12,7 @@
 // sync during the handover.
 
 import type { Address, Hex, PublicClient, WalletClient } from 'viem'
-import { SETTLEMENT_FACTORY, factoryAbi } from './settlement'
+import { SETTLEMENT_FACTORY, factoryAbi, getMarketAddress, readMarketInfo, type MarketState } from './settlement'
 
 /** Deployed FriendJury. Empty until the contract is deployed (see below). */
 export const FRIEND_JURY: Address =
@@ -201,6 +201,103 @@ export async function readJuryStatus(
     console.error('readJuryStatus error', e)
     return null
   }
+}
+
+/**
+ * Who decides this prediction, read from the chain. The Resolve page and
+ * /api/admin/resolve both ask this before Somoco records an outcome, because a
+ * friend market's result belongs to its jury: Somoco writing its own verdict
+ * would put a public claim on Intuition that the contract then refuses.
+ *
+ *   none       — no pool, or a pool without a jury: Somoco resolves it as usual
+ *   jury       — the friends (or their judge) decide; Somoco may only void
+ *   unreadable — the chain could not be read; callers must fail CLOSED
+ *
+ * Unlike readJuryStatus this does not turn a failed read into "no jury" —
+ * that is exactly the confusion that would let a verdict through.
+ */
+export type JuryView =
+  | { kind: 'none' }
+  | { kind: 'unreadable'; reason: string }
+  | {
+      kind: 'jury'
+      market: Address
+      jury: Pick<JuryStatus, 'judge' | 'opensAt' | 'judgeFrom' | 'voterCount' | 'votesCast' | 'votesYes' | 'votesNo' | 'finalized' | 'disputed' | 'judgeCanActNow'>
+      marketState: MarketState
+      /** What the market settled on. 'unresolved' until it is final (and after a void). */
+      marketOutcome: 'unresolved' | 'yes' | 'no'
+    }
+
+export async function readJuryView(publicClient: PublicClient, tripleId: Hex): Promise<JuryView> {
+  if (!juryConfigured()) return { kind: 'none' }
+  try {
+    const market = await getMarketAddress(publicClient, tripleId)
+    if (!market) return { kind: 'none' }
+
+    const [[jury, registered, disputed, judgeCanActNow], info] = await Promise.all([
+      publicClient.readContract({
+        address: FRIEND_JURY, abi: friendJuryAbi, functionName: 'status', args: [market],
+      }) as Promise<[
+        { judge: Address; opensAt: bigint; judgeFrom: bigint; voterCount: number;
+          votesCast: number; votesYes: number; votesNo: number; finalized: boolean },
+        boolean, boolean, boolean,
+      ]>,
+      readMarketInfo(publicClient, market),
+    ])
+    if (!registered) return { kind: 'none' }
+
+    return {
+      kind: 'jury',
+      market,
+      jury: {
+        judge: jury.judge,
+        opensAt: Number(jury.opensAt),
+        judgeFrom: Number(jury.judgeFrom),
+        voterCount: Number(jury.voterCount),
+        votesCast: Number(jury.votesCast),
+        votesYes: Number(jury.votesYes),
+        votesNo: Number(jury.votesNo),
+        finalized: jury.finalized,
+        disputed,
+        judgeCanActNow,
+      },
+      marketState: info.state,
+      marketOutcome: info.outcome,
+    }
+  } catch (e) {
+    return { kind: 'unreadable', reason: e instanceof Error ? e.message.split('\n')[0] : String(e) }
+  }
+}
+
+/**
+ * Whether Somoco may record `outcome` for a prediction, given its jury view.
+ * Returns a reason to refuse, or null. For a friend market the only outcome
+ * Somoco may record is the one the contract already holds, and an unreadable
+ * chain refuses everything (fails closed). Used by /api/admin/resolve.
+ */
+export function juryRecordRefusal(
+  view: JuryView,
+  outcome: 'resolved_true' | 'resolved_false' | 'voided'
+): string | null {
+  if (view.kind === 'none') return null
+  if (view.kind === 'unreadable') {
+    return `This is a friend market and its jury could not be read from the chain (${view.reason}). Nothing was recorded — try again.`
+  }
+
+  if (outcome === 'voided') {
+    return view.marketState === 'voided'
+      ? null
+      : 'This friend market has not been voided on-chain, so it cannot be recorded as voided.'
+  }
+
+  const want = outcome === 'resolved_true' ? 'yes' : 'no'
+  if (view.marketState !== 'resolved') {
+    return 'This is a friend market — the friends who bet in it (or their judge) decide the outcome, not Somoco. It has not been settled on-chain yet.'
+  }
+  if (view.marketOutcome !== want) {
+    return `The friends settled this market ${view.marketOutcome.toUpperCase()} on-chain, so it cannot be recorded as ${want.toUpperCase()}.`
+  }
+  return null
 }
 
 /** Cast your vote on what actually happened. One each, unchangeable. */

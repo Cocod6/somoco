@@ -7,14 +7,22 @@
 //
 // Fake test predictions (from mockData.ts) still appear too, for free,
 // wallet-free UI testing — they're clearly marked and never touch real money.
+//
+// Friend markets are the exception to "Somoco decides": when a prediction has
+// an on-chain jury, the friends who bet (or their judge) settle it, and this
+// screen offers no verdict at all — only Void, and a button to copy the
+// friends' result into Somoco's record once they've reached it. Resolving one
+// here used to write a permanent outcome Triple and mark the row resolved
+// before the contract refused (it did, 2026-10-13, on a test market).
 
 import { useEffect, useState } from 'react'
 import { useAccount, useWalletClient, usePublicClient, useChainId } from 'wagmi'
-import type { Hex } from 'viem'
+import type { Address, Hex } from 'viem'
 import { mockPredictions } from '@/lib/predictions/mockData'
 import { resolvePredictionOnChain } from '@/lib/predictions/resolveOnchain'
 import { getMarketAddress, readMarketInfo, resolveMarket, voidMarket } from '@/lib/predictions/settlement'
 import { signAdminAction } from '@/lib/adminSign'
+import { readJuryView, type JuryView } from '@/lib/predictions/friendJury'
 import { supabase, type PredictionRecord } from '@/lib/supabase'
 import type { ExternalResolutionRef } from '@/lib/predictions/types'
 
@@ -35,7 +43,12 @@ interface DisplayPrediction {
    * the outcome someone already published" — see sourceOutcomes below.
    */
   external: ExternalResolutionRef | null
+  /** The creator asked for a friend market. Whether it really HAS a jury is read from the chain. */
+  isPrivate: boolean
 }
+
+/** Per prediction id; only friend markets get an entry. */
+type JuryEntry = JuryView | { kind: 'loading' }
 
 /**
  * What the source market says, per prediction id.
@@ -90,6 +103,7 @@ function fromRecord(r: PredictionRecord): DisplayPrediction {
     creatorAddress: r.creator_address,
     supabaseId: r.id,
     external: r.resolution_plan?.external ?? null,
+    isPrivate: r.is_private === true,
   }
 }
 
@@ -106,6 +120,7 @@ function fromMock(m: typeof mockPredictions[number]): DisplayPrediction {
     creatorAddress: null,
     supabaseId: null,
     external: null,
+    isPrivate: false,
   }
 }
 
@@ -126,6 +141,8 @@ export default function ResolveAdmin({ isConnected }: { isConnected: boolean }) 
   // prediction the outcome is already published, so the admin confirms it
   // rather than deciding it.
   const [sourceOutcomes, setSourceOutcomes] = useState<Record<string, SourceOutcome>>({})
+  // Who decides each friend market, read from the chain once the rows load.
+  const [juries, setJuries] = useState<Record<string, JuryEntry>>({})
 
   const { data: walletClient } = useWalletClient()
   const { address } = useAccount()
@@ -185,6 +202,107 @@ export default function ResolveAdmin({ isConnected }: { isConnected: boolean }) 
     loadApproved()
   }, [])
 
+  // Friend markets: read each one's jury. A stable string key so this reruns
+  // when the set of friend markets changes, not on every status update.
+  const friendKey = predictions
+    .filter(p => p.isPrivate && p.tripleId)
+    .map(p => `${p.id}:${p.tripleId}`)
+    .join(',')
+
+  useEffect(() => {
+    if (!publicClient || !friendKey) return
+    let cancelled = false
+    const pairs = friendKey.split(',').map(pair => pair.split(':') as [string, Hex])
+    void Promise.all(
+      pairs.map(async ([id, tripleId]) => [id, await readJuryView(publicClient, tripleId)] as const)
+    ).then(views => {
+      if (!cancelled) setJuries(prev => ({ ...prev, ...Object.fromEntries(views) }))
+    })
+    return () => { cancelled = true }
+  }, [publicClient, friendKey])
+
+  /**
+   * Writes an outcome to Somoco's own record via the signed admin route.
+   * Returns an error message, or null. The chain is always updated BEFORE this
+   * runs, so a failure here means "the record is behind", never "it didn't happen".
+   */
+  const recordInDb = async (
+    pred: DisplayPrediction,
+    outcome: AdminOutcome,
+    txHash: string | null,
+    receipt: Receipt
+  ): Promise<string | null> => {
+    if (!pred.supabaseId || !address || !walletClient) return null
+    try {
+      const auth = await signAdminAction(walletClient, address, outcome, pred.supabaseId)
+      const res = await fetch('/api/admin/resolve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: pred.supabaseId,
+          outcome,
+          txHash,
+          // The receipt. Who and when are set by the server from the
+          // signature and its own clock — a browser cannot claim either.
+          sourceUrl: receipt.sourceUrl || pred.external?.url || '',
+          note: receipt.note,
+          auth,
+        }),
+      })
+      if (!res.ok) {
+        const { error: apiError } = await res.json().catch(() => ({ error: res.statusText }))
+        return apiError ?? res.statusText
+      }
+      // A stored outcome with no receipt is the old behaviour, not a
+      // failure — but say so, because the whole point was the receipt.
+      const { receiptStored } = (await res.json().catch(() => ({}))) as { receiptStored?: boolean }
+      if (receiptStored === false) {
+        setError('Recorded, but the receipt columns are missing — re-run schema.sql in Supabase.')
+      }
+      return null
+    } catch (err) {
+      return err instanceof Error ? err.message : 'signature declined'
+    }
+  }
+
+  /**
+   * Copies a friend market's on-chain result into Somoco's record. Writes no
+   * Triple: the friends decided this, and Somoco publishing its own verdict
+   * about it is exactly what this screen must not do. The server re-reads the
+   * chain and refuses anything the contract doesn't already say.
+   */
+  const handleRecordFriends = async (pred: DisplayPrediction) => {
+    setError(null)
+    if (!pred.tripleId || !publicClient) return
+    setResolvingId(pred.id)
+    try {
+      const view = await readJuryView(publicClient, pred.tripleId)
+      setJuries(prev => ({ ...prev, [pred.id]: view }))
+      if (view.kind !== 'jury') {
+        setError(view.kind === 'unreadable' ? `Could not read the jury: ${view.reason}` : 'This market has no jury on-chain.')
+        return
+      }
+      const outcome = settledOutcome(view)
+      if (!outcome) {
+        setError('The friends have not settled this market on-chain yet.')
+        return
+      }
+      const failure = await recordInDb(pred, outcome, null, {
+        sourceUrl: `https://explorer.intuition.systems/address/${view.market}`,
+        note: outcome === 'voided'
+          ? 'Voided on-chain — every stake refunded.'
+          : `Settled ${outcome === 'resolved_true' ? 'YES' : 'NO'} on-chain by the friends who bet in this market${view.jury.disputed ? ', with their judge deciding the split vote' : ''}.`,
+      })
+      if (failure) {
+        setError(`Somoco's record did not update: ${failure}`)
+        return
+      }
+      setPredictions(prev => prev.map(p => (p.id === pred.id ? { ...p, status: outcome } : p)))
+    } finally {
+      setResolvingId(null)
+    }
+  }
+
   const handleResolve = async (
     pred: DisplayPrediction,
     outcome: AdminOutcome,
@@ -208,6 +326,28 @@ export default function ResolveAdmin({ isConnected }: { isConnected: boolean }) 
     if (!isConnected || !walletClient || !publicClient) {
       alert('Connect your wallet first to resolve a real prediction.')
       return
+    }
+
+    // Friend-market guard — the real one; the card hiding its buttons is only
+    // the first line. Read fresh from the chain, and fail closed: if we can't
+    // tell whether a jury decides this, Somoco writes nothing.
+    if (pred.isPrivate) {
+      const view = await readJuryView(publicClient, pred.tripleId)
+      setJuries(prev => ({ ...prev, [pred.id]: view }))
+      if (view.kind === 'unreadable') {
+        setError(`Could not check whether the friends decide this one, so nothing was written: ${view.reason}`)
+        return
+      }
+      if (view.kind === 'jury') {
+        if (!isVoid) {
+          setError('This is a friend market — the friends who bet in it (or their judge) decide the outcome, not Somoco. You can only void it.')
+          return
+        }
+        if (settledOutcome(view)) {
+          setError('This market is already settled on-chain — use "record their result" instead.')
+          return
+        }
+      }
     }
 
     // Contradiction guard. If the source market already published an outcome
@@ -322,46 +462,11 @@ export default function ResolveAdmin({ isConnected }: { isConnected: boolean }) 
       // privileged write, so it goes through the server and needs an admin
       // signature — the on-chain tx above already proved the admin is present,
       // but the DB write needs its own proof (see lib/adminAuth.ts).
-      if (pred.supabaseId && address) {
-        try {
-          const auth = await signAdminAction(walletClient, address, outcome, pred.supabaseId)
-          const res = await fetch('/api/admin/resolve', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              id: pred.supabaseId,
-              outcome,
-              txHash: onChainTxHash,
-              // The receipt. Who and when are set by the server from the
-              // signature and its own clock — a browser cannot claim either.
-              sourceUrl: receipt.sourceUrl || pred.external?.url || '',
-              note: receipt.note,
-              auth,
-            }),
-          })
-          if (!res.ok) {
-            const { error: apiError } = await res.json().catch(() => ({ error: res.statusText }))
-            // The chain is already updated — surface this without implying the
-            // resolution itself failed, because it didn't.
-            setError(
-              `${verb} on-chain, but Somoco's own record did not update: ${apiError ?? res.statusText}`
-            )
-          } else {
-            // A stored outcome with no receipt is the old behaviour, not a
-            // failure — but say so, because the whole point was the receipt.
-            const { receiptStored } = (await res.json().catch(() => ({}))) as {
-              receiptStored?: boolean
-            }
-            if (receiptStored === false) {
-              setError(
-                'Recorded, but the receipt columns are missing — re-run schema.sql in Supabase.'
-              )
-            }
-          }
-        } catch (err) {
-          const message = err instanceof Error ? err.message : 'signature declined'
-          setError(`${verb} on-chain, but Somoco's own record did not update: ${message}`)
-        }
+      const failure = await recordInDb(pred, outcome, onChainTxHash, receipt)
+      if (failure) {
+        // The chain is already updated — surface this without implying the
+        // resolution itself failed, because it didn't.
+        setError(`${verb} on-chain, but Somoco's own record did not update: ${failure}`)
       }
 
       setPredictions(prev => prev.map(p => (p.id === pred.id ? { ...p, status: outcome } : p)))
@@ -453,6 +558,8 @@ export default function ResolveAdmin({ isConnected }: { isConnected: boolean }) 
             key={pred.id}
             prediction={pred}
             onResolve={handleResolve}
+            onRecordFriends={handleRecordFriends}
+            jury={pred.isPrivate && pred.tripleId ? juries[pred.id] ?? { kind: 'loading' } : undefined}
             isResolving={resolvingId === pred.id}
             portalLinks={resolutionLinks[pred.id]}
             sourceOutcome={pred.external ? sourceOutcomes[pred.id] ?? 'loading' : undefined}
@@ -466,12 +573,17 @@ export default function ResolveAdmin({ isConnected }: { isConnected: boolean }) 
 function PredictionCard({
   prediction,
   onResolve,
+  onRecordFriends,
+  jury,
   isResolving,
   portalLinks,
   sourceOutcome,
 }: {
   prediction: DisplayPrediction
   onResolve: (pred: DisplayPrediction, outcome: AdminOutcome, receipt: Receipt) => void
+  onRecordFriends: (pred: DisplayPrediction) => void
+  /** undefined = not a friend market. Anything but `none` means Somoco gives no verdict here. */
+  jury?: JuryEntry
   isResolving: boolean
   portalLinks?: { resolution: string; reputation: string | null }
   /** undefined = not a mirrored prediction, so there is nothing to confirm. */
@@ -486,6 +598,9 @@ function PredictionCard({
   const status = statusLabel(prediction.resolutionDate)
   const isResolved = prediction.status !== 'pending'
   const isReal = prediction.tripleId !== null
+  // A friend market whose outcome is not Somoco's to give. 'loading' and
+  // 'unreadable' count too: the verdict buttons stay hidden until we know.
+  const friendsDecide = jury !== undefined && jury.kind !== 'none'
 
   return (
     <div style={{
@@ -541,6 +656,16 @@ function PredictionCard({
       {/* What the source market already published. Shown ABOVE the buttons on
           purpose: the admin should read the answer before reaching for a
           verdict, not after. */}
+      {jury && friendsDecide && (
+        <FriendJuryPanel
+          jury={jury}
+          status={prediction.status}
+          isResolving={isResolving}
+          onRecord={() => onRecordFriends(prediction)}
+          onVoid={() => onResolve(prediction, 'voided', { sourceUrl: '', note: '' })}
+        />
+      )}
+
       {!isResolved && sourceOutcome !== undefined && (
         <SourceOutcomeBanner outcome={sourceOutcome} url={prediction.external?.url} />
       )}
@@ -548,7 +673,7 @@ function PredictionCard({
       {/* The receipt, captured before the verdict rather than after: users see
           "resolved false" and currently have to take Somoco's word for it. A
           link and a sentence are the difference between a record and a claim. */}
-      {!isResolved && (
+      {!isResolved && !friendsDecide && (
         <div style={{ marginBottom: 12, display: 'grid', gap: 8 }}>
           <input
             type="url"
@@ -577,7 +702,7 @@ function PredictionCard({
         </div>
       )}
 
-      {!isResolved ? (
+      {friendsDecide ? null : !isResolved ? (
         <div style={{ display: 'flex', gap: 10 }}>
           <button
             onClick={() => onResolve(prediction, 'resolved_true', { sourceUrl, note })}
@@ -703,6 +828,114 @@ function outcomeStyle(status: 'pending' | AdminOutcome): {
     return { text: '⊘ voided — everyone refunded', bg: '#141414', color: 'var(--text-muted)', border: 'var(--border)' }
   }
   return { text: '✗ resolved false', bg: '#1a0a0a', color: '#ff6b6b', border: '#3d1a1a' }
+}
+
+/** What a friend market's contract has settled on, or null while it is still open/locked. */
+function settledOutcome(view: Extract<JuryView, { kind: 'jury' }>): AdminOutcome | null {
+  if (view.marketState === 'voided') return 'voided'
+  if (view.marketState !== 'resolved') return null
+  if (view.marketOutcome === 'yes') return 'resolved_true'
+  if (view.marketOutcome === 'no') return 'resolved_false'
+  return null
+}
+
+const short = (a: Address) => `${a.slice(0, 6)}…${a.slice(-4)}`
+
+/**
+ * Stands in for the verdict buttons on a friend market. Somoco's only moves
+ * here are to refund everyone (void) or to copy what the friends decided into
+ * its own record — both checked again by the server against the chain.
+ */
+function FriendJuryPanel({
+  jury, status, isResolving, onRecord, onVoid,
+}: {
+  jury: JuryEntry
+  status: 'pending' | AdminOutcome
+  isResolving: boolean
+  onRecord: () => void
+  onVoid: () => void
+}) {
+  const box: React.CSSProperties = {
+    borderRadius: 10, padding: '12px 14px', marginBottom: 12,
+    background: 'var(--purple-bg)', border: '1px solid var(--purple-border)',
+    fontSize: 12.5, lineHeight: 1.7, color: 'var(--text-muted)',
+  }
+  const heading = (
+    <div style={{ fontSize: 10, letterSpacing: 1, fontFamily: 'var(--font-mono)', color: 'var(--purple)', marginBottom: 6 }}>
+      FRIEND MARKET · THE FRIENDS DECIDE, NOT SOMOCO
+    </div>
+  )
+
+  if (jury.kind === 'loading') {
+    return <div style={box}>{heading}checking on-chain who decides this…</div>
+  }
+  if (jury.kind === 'unreadable') {
+    return (
+      <div style={box}>
+        {heading}
+        Couldn&apos;t read this market&apos;s jury from the chain, so the verdict buttons stay hidden.
+        Reload to try again. <span style={{ color: 'var(--text-dim)' }}>({jury.reason})</span>
+      </div>
+    )
+  }
+  if (jury.kind !== 'jury') return null
+
+  const j = jury.jury
+  const settled = settledOutcome(jury)
+  const recorded = status !== 'pending'
+  const judgeLine = j.finalized
+    ? 'the jury has ruled'
+    : j.disputed
+      ? 'votes are split — the judge can rule now'
+      : j.judgeCanActNow
+        ? 'voting window is over — the judge can rule now'
+        : `the judge can rule from ${new Date(j.judgeFrom * 1000).toLocaleString()}`
+
+  const buttonStyle: React.CSSProperties = {
+    padding: '9px 14px', fontSize: 12.5, borderRadius: 10, cursor: 'pointer',
+    background: 'transparent', color: 'var(--text-muted)', border: '1px solid var(--border)',
+    opacity: isResolving ? 0.5 : 1,
+  }
+
+  return (
+    <div style={box}>
+      {heading}
+      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+        {j.votesCast} of {j.voterCount} voted ({j.votesYes} yes · {j.votesNo} no) · judge {short(j.judge)} · {judgeLine}
+      </div>
+      <div style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+        on-chain: {settled ? outcomeStyle(settled).text : `not settled yet (${jury.marketState})`}
+        {recorded && <> · somoco&apos;s record: {outcomeStyle(status).text}</>}
+      </div>
+
+      {/* The record and the money disagree — say so plainly. */}
+      {recorded && settled !== status && (
+        <div style={{ marginTop: 8, color: 'var(--amber)' }}>
+          {settled
+            ? 'Somoco’s record does not match what the contract settled. Recording the friends’ result will correct it.'
+            : 'Somoco’s record says this is settled, but the contract hasn’t settled — the stakes are still locked. The friends or their judge can still decide it; then record their result here. Or void it to refund everyone.'}
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: 10, marginTop: 10, flexWrap: 'wrap' }}>
+        {settled && settled !== status && (
+          <button onClick={onRecord} disabled={isResolving} className="btn" style={{ ...buttonStyle, color: 'var(--text)' }}>
+            {isResolving ? '⟳ recording…' : 'record their result'}
+          </button>
+        )}
+        {!settled && (
+          <button
+            onClick={onVoid}
+            disabled={isResolving}
+            title="Refund everyone — the only outcome Somoco may give a friend market"
+            style={buttonStyle}
+          >
+            {isResolving ? '⟳ voiding…' : '⊘ void — refund everyone'}
+          </button>
+        )}
+      </div>
+    </div>
+  )
 }
 
 function dimUnless(outcome: SourceOutcome | undefined, side: 'resolved_true' | 'resolved_false'): number {

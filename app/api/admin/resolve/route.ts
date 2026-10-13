@@ -8,6 +8,14 @@
 // transaction) — but Somoco's own record of it was, with the anon key. This
 // route closes that gap so the DB can't claim a resolution that never happened.
 //
+// FRIEND MARKETS (2026-10-13). A friend market's outcome belongs to its jury,
+// not to Somoco. So for a prediction with an on-chain jury, this route records
+// only what the market contract itself already says — resolved YES/NO by the
+// jury, or voided — and refuses anything else. Before this, the Resolve page
+// could mark a friend market "resolved false" in the DB while the contract
+// (correctly) refused Somoco's verdict, leaving the record contradicting the
+// money. The jury is read from the chain, never from the row.
+//
 // It also writes the RECEIPT: which source said so, why, when, and who. Two of
 // those four are deliberately not taken from the request body — see below.
 
@@ -16,6 +24,20 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin'
 import { verifyAdmin, type AdminAuth } from '@/lib/adminAuth'
 import { writeResolutionSentence } from '@/lib/predictions/resolutionSentence'
 import type { ResolutionPlan } from '@/lib/predictions/types'
+import { createPublicClient, http, type Hex } from 'viem'
+import { intuition, INTUITION_RPC_URL } from '@/lib/chain'
+import { readJuryView, juryRecordRefusal } from '@/lib/predictions/friendJury'
+
+const publicClient = createPublicClient({ chain: intuition, transport: http(INTUITION_RPC_URL) })
+
+/**
+ * For a friend market with a jury, the only outcome Somoco may record is the
+ * one the contract already holds. Returns a reason to refuse, or null.
+ * Fails closed: if the chain can't be read, nothing is recorded.
+ */
+async function juryRefusal(tripleId: string, outcome: Outcome): Promise<string | null> {
+  return juryRecordRefusal(await readJuryView(publicClient, tripleId as Hex), outcome)
+}
 
 const OUTCOMES = ['resolved_true', 'resolved_false', 'voided'] as const
 type Outcome = (typeof OUTCOMES)[number]
@@ -105,6 +127,17 @@ export async function POST(request: Request) {
       { error: err instanceof Error ? err.message : 'Database unavailable.' },
       { status: 500 }
     )
+  }
+
+  const { data: target } = await db
+    .from('predictions')
+    .select('triple_id, is_private')
+    .eq('id', id)
+    .maybeSingle()
+
+  if (target?.is_private === true && target.triple_id) {
+    const refusal = await juryRefusal(String(target.triple_id), outcome as Outcome)
+    if (refusal) return NextResponse.json({ error: refusal }, { status: 409 })
   }
 
   // If the resolver didn't type an explanation, have the AI write one from the
