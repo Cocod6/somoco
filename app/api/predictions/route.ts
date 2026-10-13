@@ -22,7 +22,11 @@
 //      could express: a market on a named person's death passes every
 //      structural check ever written
 //
-// Both must pass. Either one failing, or being unable to run, leaves the row
+// Both must pass, and so must verifyCreator.ts — proof from the creation
+// transaction that the Triple exists and the named wallet made it. Without
+// that, a forged request could publish under anyone's name.
+//
+// All three must pass. Any one failing, or being unable to run, leaves the row
 // `pending` exactly as before — the queue is still there, it just gets the hard
 // cases instead of everything. Set AUTO_APPROVE=false to switch it off entirely.
 //
@@ -35,6 +39,7 @@ import { NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabaseAdmin'
 import { assessAutoApproval, claimKeyFor, type AssessableRow } from '@/lib/predictions/autoApprove'
 import { screenForAutoApproval } from '@/lib/predictions/aiScreen'
+import { verifyTripleCreator, type ReceiptCache } from '@/lib/predictions/verifyCreator'
 import type { ResolutionPlan } from '@/lib/predictions/types'
 
 /**
@@ -116,12 +121,13 @@ const HELD = (note: string): ApprovalDecision => ({
  * Decides whether a submitted prediction may go live without a human.
  *
  * Order matters: the free structural checks run first and most rejections stop
- * there, so the paid AI call only happens for predictions that are otherwise
- * ready. Everything here fails towards `pending` — the queue is the safe state.
+ * there, then the on-chain creator check, so the paid AI call only happens for
+ * predictions that are otherwise ready — and never for a forged one. Everything here fails towards `pending` — the queue is the safe state.
  */
 async function decideApproval(
   row: Record<string, unknown>,
-  openClaimKeys: Set<string> | undefined
+  openClaimKeys: Set<string> | undefined,
+  receipts: ReceiptCache
 ): Promise<ApprovalDecision> {
   if (!autoApproveEnabled()) return HELD('Auto-approval is switched off (AUTO_APPROVE=false).')
 
@@ -143,6 +149,13 @@ async function decideApproval(
 
   const assessment = assessAutoApproval(assessable, openClaimKeys)
   if (!assessment.eligible) return HELD(assessment.blockers.join(' '))
+
+  // tx_hash is read from the raw row: it is proof, not a column, so sanitize()
+  // drops it before the insert.
+  const creator = await verifyTripleCreator(
+    String(row.triple_id ?? ''), assessable.creator_address, row.tx_hash, receipts
+  )
+  if (!creator.verified) return HELD(creator.reason)
 
   const screen = await screenForAutoApproval({
     subject: assessable.subject,
@@ -197,7 +210,8 @@ export async function POST(request: Request) {
   // Decide publication per row BEFORE the insert, so an approved prediction is
   // live the moment it is saved rather than a write behind a write.
   const openClaimKeys = autoApproveEnabled() ? await loadOpenClaimKeys(db) : undefined
-  const decisions = await Promise.all(rows.map(row => decideApproval(row, openClaimKeys)))
+  const receipts: ReceiptCache = new Map()
+  const decisions = await Promise.all(rows.map(row => decideApproval(row, openClaimKeys, receipts)))
 
   let payload: Record<string, unknown>[] = rows.map((row, i) => ({ ...sanitize(row), ...decisions[i] }))
 

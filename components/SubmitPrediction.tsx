@@ -68,12 +68,16 @@ export interface FriendConfig {
 function toDbRow(
   r: ParseResponse,
   tripleId: string,
+  txHash: string,
   address: string,
   imageUrl: string | null,
   friends: FriendConfig | null = null
 ) {
   return {
     triple_id: tripleId,
+    // Not stored. The server reads the creation receipt to prove this wallet
+    // made this Triple before it will auto-approve (lib/predictions/verifyCreator.ts).
+    tx_hash: txHash,
     creator_address: address,
     subject: r.parsed.subject,
     claim: r.parsed.claim,
@@ -335,7 +339,7 @@ export default function SubmitPrediction({
       setTripleIds([onChain.tripleId])
 
       const saved = await insertPredictionRows([
-        toDbRow(result, onChain.tripleId, address ?? '', image?.url ?? null, friendConfig()),
+        toDbRow(result, onChain.tripleId, onChain.txHash, address ?? '', image?.url ?? null, friendConfig()),
       ])
       if (saved.error) {
         // The Triple is already real on-chain; this only affects the approval queue.
@@ -374,7 +378,7 @@ export default function SubmitPrediction({
       setTripleIds(batch.triples.map(t => t.tripleId))
 
       const rows = cart.map((item, i) =>
-        toDbRow(item.result, batch.triples[i].tripleId, address ?? '', item.image?.url ?? null),
+        toDbRow(item.result, batch.triples[i].tripleId, batch.txHash, address ?? '', item.image?.url ?? null),
       )
       const saved = await insertPredictionRows(rows)
       if (saved.error) {
